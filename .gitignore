@@ -83,9 +83,9 @@ desktop.ini
 *.tiff
 *.TIF
 *.TIFF
-# Uncomment if you want to track some example images:
-# !example_data1/*.tif
-# !example_data2/*.tif
+# Allow all example_data files regardless of extension
+!example_data/**/*
+!example_data*/**/*
 
 # JSON output files (optional - uncomment if you don't want to track)
 # particle_selections_*.json
@@ -95,6 +95,12 @@ desktop.ini
 
 # PNG plots
 *.png
+
+# Allow all files in example_data folders (overrides above ignores)
+!example_data/**/*.csv
+!example_data*/**/*.csv
+!example_data/**/*.png
+!example_data*/**/*.png
 
 # GPU/CUDA cache
 .cuda_cache/
