@@ -1,0 +1,100 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project-specific: Output directories
+scripts_output/
+*_aligned/
+
+# Project-specific: Example data (optional - uncomment if you don't want to track)
+# example_data*/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# OS-specific files
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Large data files (optional)
+*.tif
+*.tiff
+*.TIF
+*.TIFF
+# Uncomment if you want to track some example images:
+# !example_data1/*.tif
+# !example_data2/*.tif
+
+# JSON output files (optional - uncomment if you don't want to track)
+# particle_selections_*.json
+
+# CSV output files
+*.csv
+
+# PNG plots
+*.png
+
+# GPU/CUDA cache
+.cuda_cache/
