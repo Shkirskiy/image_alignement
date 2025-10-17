@@ -404,6 +404,8 @@ class ParticleSelector:
 
     def export_all_to_json(self, auto_save=False):
         """Export all image sets to JSON file automatically.
+        
+        Uses a single fixed filename and merges with existing data if present.
 
         Args:
             auto_save: If True, this is an automatic save on window close
@@ -417,13 +419,31 @@ class ParticleSelector:
         output_dir = Path.cwd().parent / "scripts_output"
         output_dir.mkdir(exist_ok=True)
 
-        # Generate automatic filename
-        filename = output_dir / f"particle_selections_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        # Use fixed filename (no timestamp)
+        filename = output_dir / "particle_selections.json"
+
+        # Check if file already exists and load it
+        existing_data = {'image_sets': [], 'total_sets': 0}
+        if filename.exists():
+            try:
+                with open(filename, 'r') as f:
+                    existing_data = json.load(f)
+                print(f"\n=== UPDATING EXISTING FILE ===")
+                print(f"  Found existing file with {len(existing_data.get('image_sets', []))} image set(s)")
+            except Exception as e:
+                print(f"\n=== WARNING: Could not read existing file ===")
+                print(f"  Error: {e}")
+                print(f"  Creating new file instead...")
+                existing_data = {'image_sets': [], 'total_sets': 0}
+
+        # Merge new image sets with existing ones
+        all_image_sets = existing_data.get('image_sets', []) + self.all_image_sets
 
         output_data = {
-            'image_sets': self.all_image_sets,
-            'total_sets': len(self.all_image_sets),
-            'created': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            'image_sets': all_image_sets,
+            'total_sets': len(all_image_sets),
+            'created': existing_data.get('created', datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            'last_modified': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
         try:
@@ -436,10 +456,11 @@ class ParticleSelector:
             else:
                 print(f"\n=== EXPORT SUCCESSFUL ===")
 
-            print(f"  Saved to: {filename}")
-            print(f"  Total image sets: {len(self.all_image_sets)}")
+            print(f"  Saved to: {filename.name}")
+            print(f"  Total image sets in file: {len(all_image_sets)}")
+            print(f"  New sets added in this session: {len(self.all_image_sets)}")
             for i, img_set in enumerate(self.all_image_sets, 1):
-                print(f"  Set {i}: {Path(img_set['folder_path']).name} ({len(img_set['selected_particles'])} particles)")
+                print(f"  New Set {i}: {Path(img_set['folder_path']).name} ({len(img_set['selected_particles'])} particles)")
 
             return filename
 

@@ -275,7 +275,10 @@ def validate_aligned_image_set(args: Tuple[int, Dict[str, Any], Optional[mp.Queu
         position=set_index,
         leave=True,
         unit="fit",
-        ncols=100
+        ncols=100,
+        dynamic_ncols=False,
+        miniters=1,
+        mininterval=0.1
     )
 
     # Process aligned images ONE BY ONE (memory efficient)
@@ -498,7 +501,10 @@ def aggregate_validation_drift(args: Tuple[str, str, Path, int]) -> Optional[Dic
         position=set_index,
         leave=True,
         unit="file",
-        ncols=100
+        ncols=100,
+        dynamic_ncols=False,
+        miniters=1,
+        mininterval=0.1
     )
 
     try:

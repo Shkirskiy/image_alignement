@@ -191,7 +191,10 @@ def process_single_image_set(args: Tuple[int, Dict[str, Any], Optional[mp.Queue]
         position=set_index,
         leave=True,
         unit="fit",
-        ncols=100
+        ncols=100,
+        dynamic_ncols=False,
+        miniters=1,
+        mininterval=0.1
     )
 
     # Process images ONE BY ONE (memory efficient)
