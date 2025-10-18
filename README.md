@@ -11,7 +11,7 @@ This pipeline is designed to align large sequences of 16-bit .tif images from hi
 
 ## Method Overview
 
-The core methodology is based on manual selection of particles, followed by Gaussian fitting to precisely determine and track their locations. The pipeline then applies drift corrections to transpose images based on the measured particle movements.
+The core methodology is based on manual selection of particles, followed by Gaussian fitting to precisely determine and track their locations. The pipeline then applies drift corrections to transpose images based on the measured particle movements. The approach assumes your images have: rigid body motion (translation + rotation, no shearing or scaling), multiple trackable particles that move together, small incremental drift between consecutive frames. The transformation treats the image as a rigid plane that has shifted and rotated slightly, and the alignment corrects this by applying the inverse transformation to bring everything back into a common reference frame.
 
 The following example shows typical results from `example_data1` before and after alignment (center mark added for visual reference):
 
