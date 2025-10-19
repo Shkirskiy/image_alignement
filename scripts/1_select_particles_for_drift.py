@@ -28,9 +28,14 @@ from scipy.optimize import curve_fit
 import json
 from typing import Optional, Tuple, Dict, Any, List
 from qtpy.QtWidgets import QApplication, QFileDialog, QMessageBox, QInputDialog
+from qtpy.QtCore import QTimer
 import sys
 from datetime import datetime
 from magicgui import magic_factory
+from logging_utils import setup_logger, log_exception
+
+# Setup centralized logger
+logger = setup_logger('Step1_ParticleSelection')
 
 class ParticleSelector:
     """
@@ -92,12 +97,12 @@ class ParticleSelector:
             return False
 
         self.tif_files.sort()
-        print(f"\nFound {len(self.tif_files)} TIF files in:")
-        print(f"  {self.directory_path}")
+        logger.info(f"\nFound {len(self.tif_files)} TIF files in:")
+        logger.info(f"  {self.directory_path}")
         for f in self.tif_files[:5]:
-            print(f"  {f.name}")
+            logger.info(f"  {f.name}")
         if len(self.tif_files) > 5:
-            print(f"  ... and {len(self.tif_files) - 5} more")
+            logger.info(f"  ... and {len(self.tif_files) - 5} more")
 
         return True
 
@@ -115,9 +120,9 @@ class ParticleSelector:
                 print("Error: Image must be grayscale (2D)")
                 return False
 
-            print(f"\nLoaded first image: {self.current_image_path.name}")
-            print(f"  Shape: {self.current_image.shape}")
-            print(f"  Value range: {self.current_image.min()} - {self.current_image.max()}")
+            logger.info(f"\nLoaded first image: {self.current_image_path.name}")
+            logger.info(f"  Shape: {self.current_image.shape}")
+            logger.info(f"  Value range: {self.current_image.min()} - {self.current_image.max()}")
             return True
 
         except Exception as e:
@@ -238,9 +243,9 @@ class ParticleSelector:
         region = self.current_image[y0:y1, x0:x1].copy()
 
         self.particle_counter += 1
-        print(f"\n=== Validating Particle #{self.particle_counter} ===")
-        print(f"  Region: ({x0}, {y0}) to ({x1}, {y1})")
-        print(f"  Size: {region.shape}")
+        logger.info(f"\n=== Validating Particle #{self.particle_counter} ===")
+        logger.info(f"  Region: ({x0}, {y0}) to ({x1}, {y1})")
+        logger.info(f"  Size: {region.shape}")
 
         # Fit Gaussian
         result = self.fit_gaussian_to_region(region, (x0, y0, x1, y1))
@@ -256,9 +261,9 @@ class ParticleSelector:
             }
             self.validated_particles.append(particle_data)
 
-            print(f"  ✓ FIT SUCCESSFUL - SAVED")
-            print(f"    Center: ({result['center_x']:.2f}, {result['center_y']:.2f})")
-            print(f"    R²: {result['r_squared']:.4f}")
+            logger.info(f"  ✓ FIT SUCCESSFUL - SAVED")
+            logger.info(f"    Center: ({result['center_x']:.2f}, {result['center_y']:.2f})")
+            logger.info(f"    R²: {result['r_squared']:.4f}")
 
             # Add GREEN point to show success
             if self.points_layer is not None:
@@ -273,7 +278,7 @@ class ParticleSelector:
             self.update_button_text()
         else:
             # Failed fit - REJECT IT
-            print(f"  ✗ FIT FAILED - REJECTED (not saved)")
+            logger.info(f"  ✗ FIT FAILED - REJECTED (not saved)")
 
             # Add RED X to show failure
             if self.failed_points_layer is not None:
@@ -328,10 +333,10 @@ class ParticleSelector:
 
         self.all_image_sets.append(image_set_data)
 
-        print(f"\n=== Current Selection Saved ===")
-        print(f"  Folder: {self.directory_path.name}")
-        print(f"  Validated particles: {len(self.validated_particles)}")
-        print(f"  Total images in set: {len(self.tif_files)}")
+        logger.info(f"\n=== Current Selection Saved ===")
+        logger.info(f"  Folder: {self.directory_path.name}")
+        logger.info(f"  Validated particles: {len(self.validated_particles)}")
+        logger.info(f"  Total images in set: {len(self.tif_files)}")
 
         return True
 
@@ -358,16 +363,19 @@ class ParticleSelector:
             )
 
             if reply == QMessageBox.Yes:
-                # Close current viewer and restart
+                # Close current viewer and restart (deferred to avoid widget deletion errors)
                 if selector.viewer:
-                    selector.viewer.close()
-                # Run again for next set
-                selector.run_selection_session()
+                    # Use QTimer to defer the close until after callback completes
+                    QTimer.singleShot(0, lambda: (
+                        selector.viewer.close(),
+                        selector.run_selection_session()
+                    ))
             else:
-                # Export all to JSON and exit
+                # Export all to JSON and exit (deferred to avoid widget deletion errors)
                 selector.export_all_to_json()
                 if selector.viewer:
-                    selector.viewer.close()
+                    # Use QTimer to defer the close until after callback completes
+                    QTimer.singleShot(0, selector.viewer.close)
 
         widget = save_callback()
         self.save_widget = widget
@@ -428,20 +436,45 @@ class ParticleSelector:
             try:
                 with open(filename, 'r') as f:
                     existing_data = json.load(f)
-                print(f"\n=== UPDATING EXISTING FILE ===")
-                print(f"  Found existing file with {len(existing_data.get('image_sets', []))} image set(s)")
+                logger.info(f"\n=== UPDATING EXISTING FILE ===")
+                logger.info(f"  Found existing file with {len(existing_data.get('image_sets', []))} image set(s)")
             except Exception as e:
                 print(f"\n=== WARNING: Could not read existing file ===")
                 print(f"  Error: {e}")
                 print(f"  Creating new file instead...")
                 existing_data = {'image_sets': [], 'total_sets': 0}
 
-        # Merge new image sets with existing ones
-        all_image_sets = existing_data.get('image_sets', []) + self.all_image_sets
+        # Check for duplicates before merging
+        existing_sets = existing_data.get('image_sets', [])
+        existing_folders = {img_set['folder_path']: idx for idx, img_set in enumerate(existing_sets)}
+        
+        # Merge, replacing duplicates with newer versions
+        merged_sets = existing_sets.copy()
+        new_count = 0
+        replaced_count = 0
+        
+        for new_set in self.all_image_sets:
+            folder_path = new_set['folder_path']
+            
+            if folder_path in existing_folders:
+                # Replace existing entry with newer one
+                idx = existing_folders[folder_path]
+                merged_sets[idx] = new_set
+                replaced_count += 1
+                logger.info(f"  Replacing existing entry for: {Path(folder_path).name}")
+            else:
+                # Add new entry
+                merged_sets.append(new_set)
+                new_count += 1
+        
+        if replaced_count > 0:
+            logger.info(f"  Replaced {replaced_count} existing folder(s) with updated particles")
+        if new_count > 0:
+            logger.info(f"  Added {new_count} new folder(s)")
 
         output_data = {
-            'image_sets': all_image_sets,
-            'total_sets': len(all_image_sets),
+            'image_sets': merged_sets,
+            'total_sets': len(merged_sets),
             'created': existing_data.get('created', datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
             'last_modified': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
@@ -451,22 +484,22 @@ class ParticleSelector:
                 json.dump(output_data, f, indent=2)
 
             if auto_save:
-                print(f"\n=== AUTO-SAVE SUCCESSFUL ===")
-                print(f"  Your work has been saved automatically!")
+                logger.info(f"\n=== AUTO-SAVE SUCCESSFUL ===")
+                logger.info(f"  Your work has been saved automatically!")
             else:
-                print(f"\n=== EXPORT SUCCESSFUL ===")
+                logger.info(f"\n=== EXPORT SUCCESSFUL ===")
 
-            print(f"  Saved to: {filename.name}")
-            print(f"  Total image sets in file: {len(all_image_sets)}")
-            print(f"  New sets added in this session: {len(self.all_image_sets)}")
+            logger.info(f"  Saved to: {filename.name}")
+            logger.info(f"  Total image sets in file: {len(merged_sets)}")
+            logger.info(f"  New sets added in this session: {len(self.all_image_sets)}")
             for i, img_set in enumerate(self.all_image_sets, 1):
-                print(f"  New Set {i}: {Path(img_set['folder_path']).name} ({len(img_set['selected_particles'])} particles)")
+                logger.info(f"  New Set {i}: {Path(img_set['folder_path']).name} ({len(img_set['selected_particles'])} particles)")
 
             return filename
 
         except Exception as e:
-            print(f"\n=== EXPORT FAILED ===")
-            print(f"  Error: {e}")
+            logger.error(f"\n=== EXPORT FAILED ===")
+            log_exception(logger, e, "Export error")
             if not auto_save:
                 msg = QMessageBox()
                 msg.setIcon(QMessageBox.Critical)
@@ -487,10 +520,10 @@ class ParticleSelector:
         def custom_close_event(event):
             # Call our auto-save handler
             if self.all_image_sets:
-                print("\n=== Window closing - Auto-saving your work... ===")
+                logger.info("\n=== Window closing - Auto-saving your work... ===")
                 self.export_all_to_json(auto_save=True)
             else:
-                print("\n=== Window closing - No data to save ===")
+                logger.info("\n=== Window closing - No data to save ===")
 
             # Call original napari closeEvent to maintain default behavior
             original_closeEvent(event)
@@ -548,15 +581,15 @@ class ParticleSelector:
         # Connect event handler
         self.detection_layer.events.data.connect(self.on_rectangle_added)
 
-        print("\n=== INSTRUCTIONS ===")
-        print("1. Select 'detection_boxes' layer")
-        print("2. Draw rectangles around particles")
-        print("3. GREEN points = successful fit (SAVED)")
-        print("4. RED X = failed fit (REJECTED)")
-        print("5. Click 'Undo Last Particle' to remove most recent selection")
-        print("6. Click 'Save Selection' when done")
-        print("7. Choose to add more image sets or finish")
-        print("\nNOTE: Your work will be auto-saved if you close the window!")
+        logger.info("\n=== INSTRUCTIONS ===")
+        logger.info("1. Select 'detection_boxes' layer")
+        logger.info("2. Draw rectangles around particles")
+        logger.info("3. GREEN points = successful fit (SAVED)")
+        logger.info("4. RED X = failed fit (REJECTED)")
+        logger.info("5. Click 'Undo Last Particle' to remove most recent selection")
+        logger.info("6. Click 'Save Selection' when done")
+        logger.info("7. Choose to add more image sets or finish")
+        logger.info("\nNOTE: Your work will be auto-saved if you close the window!")
 
     def run_selection_session(self):
         """Run a single selection session for one image set."""
@@ -594,9 +627,9 @@ class ParticleSelector:
 
     def run(self):
         """Main entry point."""
-        print("=== Particle Selection for Drift Analysis ===")
-        print("This tool helps you select particles for drift tracking.")
-        print("Only validated selections (successful Gaussian fits) are saved.\n")
+        logger.info("=== Particle Selection for Drift Analysis ===")
+        logger.info("This tool helps you select particles for drift tracking.")
+        logger.info("Only validated selections (successful Gaussian fits) are saved.\n")
 
         self.run_selection_session()
 

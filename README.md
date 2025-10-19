@@ -34,10 +34,12 @@ image_alignement/
 │   ├── 2_parallel_drift_analysis.py
 │   ├── 3_aggregate_particle_drift.py
 │   ├── 4_batch_gpu_alignment.py
-│   └── 5_validation.py
+│   ├── 5_validation.py
+│   └── logging_utils.py             # Centralized logging utility
 ├── run_pipeline.sh                   # Automated pipeline runner
 ├── scripts_output/                   # Created automatically
-│   ├── particle_selections_*.json   # Particle selections
+│   ├── particle_selections.json     # Particle selections (single file)
+│   ├── log.txt                      # Centralized log file with timestamps
 │   ├── particles_tracking/          # Per-particle drift CSVs
 │   ├── particle_drift/              # Aggregated drift CSVs
 │   └── validation/                  # Validation results
@@ -87,6 +89,7 @@ python3 5_validation.py
 - Interactive GUI for selecting particles to track
 - Validates selections with Gaussian fitting
 - Saves selections to JSON in `scripts_output/`
+- Logs all activity to console and `log.txt` with timestamps
 
 ### 2. Parallel Drift Analysis (`2_parallel_drift_analysis.py`)
 
@@ -94,6 +97,7 @@ python3 5_validation.py
 - Performs Gaussian fitting on all images
 - Tracks particle positions and calculates drift
 - Outputs to `scripts_output/particles_tracking/`
+- Logs progress and statistics to console and `log.txt`
 
 ### 3. Aggregate Particle Drift (`3_aggregate_particle_drift.py`)
 
@@ -101,6 +105,7 @@ python3 5_validation.py
 - Calculates rotation using Procrustes alignment
 - Generates drift plots
 - Outputs to `scripts_output/particle_drift/`
+- Logs aggregation results to console and `log.txt`
 
 ### 4. Batch GPU Alignment (`4_batch_gpu_alignment.py`)
 
@@ -108,6 +113,7 @@ python3 5_validation.py
 - Applies drift and rotation corrections
 - Creates aligned image folders (sibling to input folders)
 - Outputs to `{original_folder}_aligned/`
+- Logs GPU operations and progress to console and `log.txt`
 
 ### 5. Validation (`5_validation.py`)
 
@@ -115,6 +121,7 @@ python3 5_validation.py
 - Measures residual drift (should be near zero)
 - Generates comparison plots
 - Outputs to `scripts_output/validation/`
+- Logs validation metrics to console and `log.txt`
 
 ## Requirements
 
@@ -148,9 +155,19 @@ All scripts automatically:
 - Create output directories in `../scripts_output/` hierarchy
 - Handle paths correctly when run from `scripts/` directory
 
+## Logging System
+
+All scripts use a centralized logging system (`logging_utils.py`):
+
+- Logs to **both console and `log.txt`** in `scripts_output/`
+- Includes timestamps for all operations
+- Persistent across pipeline runs (appends to existing log)
+- Useful for debugging and tracking pipeline progress
+- Worker processes safely write to shared log file
+
 ## JSON File Management
 
-The pipeline uses a single JSON file that is updated at each step:
+The pipeline uses a single JSON file (`particle_selections.json`) that is updated at each step:
 
 - Created by script 1 with particle selections
 - Updated by script 2 with CSV file paths
@@ -162,7 +179,8 @@ The pipeline uses a single JSON file that is updated at each step:
 
 ### scripts_output/
 
-- `particle_selections_*.json` - Main configuration file
+- `particle_selections.json` - Main configuration file (single file, updated at each step)
+- `log.txt` - Centralized log file with timestamps from all pipeline steps
 - `particles_tracking/{folder}_{id}.csv` - Per-particle drift data
 - `particle_drift/drift_{folder}_{id}.csv` - Aggregated drift data
 - `particle_drift/drift_plot_{folder}.png` - Drift visualization
@@ -182,6 +200,8 @@ The pipeline uses a single JSON file that is updated at each step:
 3. Scripts auto-discover the JSON file (if only one exists)
 4. All scripts use `python3` command
 5. GPU alignment will use CUDA if available, otherwise CPU
+6. **All pipeline activity is logged to `scripts_output/log.txt`** with timestamps
+7. The log file persists across runs - check it for debugging or tracking progress
 
 ## Advanced Options
 

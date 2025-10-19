@@ -50,6 +50,10 @@ import torchvision.transforms.functional as TF
 from PIL import Image
 import tifffile
 from tqdm import tqdm
+from logging_utils import setup_logger, log_exception
+
+# Setup centralized logger
+logger = setup_logger('Step4_GPUAlignment')
 
 class BatchGPUAligner:
     """
@@ -79,10 +83,10 @@ class BatchGPUAligner:
         else:
             self.device = torch.device(device)
 
-        print(f"Using device: {self.device}")
+        logger.info(f"Using device: {self.device}")
         if self.device.type == 'cuda':
-            print(f"GPU: {torch.cuda.get_device_name()}")
-            print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+            logger.info(f"GPU: {torch.cuda.get_device_name()}")
+            logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
         # Load configuration
         self.image_sets = []
@@ -90,7 +94,7 @@ class BatchGPUAligner:
 
     def load_configuration(self):
         """Load JSON and read drift CSV file paths from image sets."""
-        print(f"\nLoading configuration from: {self.json_file.name}")
+        logger.info(f"\nLoading configuration from: {self.json_file.name}")
 
         if not self.json_file.exists():
             raise FileNotFoundError(f"JSON file not found: {self.json_file}")
@@ -103,7 +107,7 @@ class BatchGPUAligner:
         if not self.image_sets:
             raise ValueError("No image sets found in JSON!")
 
-        print(f"Found {len(self.image_sets)} image set(s) in JSON")
+        logger.info(f"Found {len(self.image_sets)} image set(s) in JSON")
 
         # Read drift CSV paths directly from JSON
         for idx, img_set in enumerate(self.image_sets):
@@ -115,16 +119,16 @@ class BatchGPUAligner:
             drift_csv_name = img_set.get('drift_csv_file_name')
 
             if not drift_csv_path or not drift_csv_name:
-                print(f"  Warning: Set {idx} missing drift CSV information, skipping...")
-                print(f"    Make sure to run aggregate_particle_drift.py first!")
+                logger.warning(f"  Warning: Set {idx} missing drift CSV information, skipping...")
+                logger.warning(f"    Make sure to run aggregate_particle_drift.py first!")
                 continue
 
             drift_csv = Path(drift_csv_path)
             if not drift_csv.exists():
-                print(f"  Warning: Drift CSV not found: {drift_csv}, skipping...")
+                logger.warning(f"  Warning: Drift CSV not found: {drift_csv}, skipping...")
                 continue
 
-            print(f"  Set {idx}: {drift_csv_name}")
+            logger.info(f"  Set {idx}: {drift_csv_name}")
 
             # Create output directory (sibling to input folder with suffix)
             output_dir = folder_path.parent / f"{folder_name}{self.suffix}"
@@ -141,16 +145,16 @@ class BatchGPUAligner:
 
             self.processing_tasks.append(task)
 
-            print(f"\n  Set {idx}: {folder_name}")
-            print(f"    Input: {folder_path}")
-            print(f"    Output: {output_dir}")
-            print(f"    Drift CSV: {drift_csv.name}")
-            print(f"    Images: {task['total_images']}, Particles: {task['particles']}")
+            logger.info(f"\n  Set {idx}: {folder_name}")
+            logger.info(f"    Input: {folder_path}")
+            logger.info(f"    Output: {output_dir}")
+            logger.info(f"    Drift CSV: {drift_csv.name}")
+            logger.info(f"    Images: {task['total_images']}, Particles: {task['particles']}")
 
         if not self.processing_tasks:
             raise ValueError("No valid processing tasks found!")
 
-        print(f"\nReady to process {len(self.processing_tasks)} image set(s)")
+        logger.info(f"\nReady to process {len(self.processing_tasks)} image set(s)")
 
         return True
 
@@ -164,9 +168,9 @@ class BatchGPUAligner:
         Returns:
             Processing statistics
         """
-        print(f"\n{'='*70}")
-        print(f"Processing Set {task['index']}: {task['folder_name']}")
-        print(f"{'='*70}")
+        logger.info(f"\n{'='*70}")
+        logger.info(f"Processing Set {task['index']}: {task['folder_name']}")
+        logger.info(f"{'='*70}")
 
         start_time = time.time()
 
@@ -174,7 +178,7 @@ class BatchGPUAligner:
         task['output_dir'].mkdir(parents=True, exist_ok=True)
 
         # Load drift data
-        print(f"Loading drift data from: {task['drift_csv'].name}")
+        logger.info(f"Loading drift data from: {task['drift_csv'].name}")
         try:
             drift_df = pd.read_csv(task['drift_csv'])
 
@@ -183,18 +187,18 @@ class BatchGPUAligner:
                            'rotation_degrees', 'is_reference_frame']
             missing = [c for c in required_cols if c not in drift_df.columns]
             if missing:
-                print(f"  Error: Missing columns in CSV: {missing}")
+                logger.error(f"  Error: Missing columns in CSV: {missing}")
                 return None
 
-            print(f"  Loaded drift data for {len(drift_df)} images")
+            logger.info(f"  Loaded drift data for {len(drift_df)} images")
 
             # Find reference frame
             ref_frames = drift_df[drift_df['is_reference_frame'] == True]
             if len(ref_frames) > 0:
                 ref_frame = ref_frames.iloc[0]['filename']
-                print(f"  Reference frame: {ref_frame}")
+                logger.info(f"  Reference frame: {ref_frame}")
             else:
-                print(f"  Warning: No reference frame marked")
+                logger.warning(f"  Warning: No reference frame marked")
 
             # Create drift mapping
             drift_data = {}
@@ -207,7 +211,8 @@ class BatchGPUAligner:
                 }
 
         except Exception as e:
-            print(f"  Error loading drift CSV: {e}")
+            logger.error(f"  Error loading drift CSV: {e}")
+            log_exception(logger, e, "Drift CSV loading error")
             return None
 
         # Find available images
@@ -219,10 +224,10 @@ class BatchGPUAligner:
         tif_files.sort()
 
         if not tif_files:
-            print(f"  Error: No TIF files found in {input_dir}")
+            logger.error(f"  Error: No TIF files found in {input_dir}")
             return None
 
-        print(f"  Found {len(tif_files)} TIF files")
+        logger.info(f"  Found {len(tif_files)} TIF files")
 
         # Match images with drift data
         images_to_process = []
@@ -230,10 +235,10 @@ class BatchGPUAligner:
             if tif_file.name in drift_data:
                 images_to_process.append((tif_file, drift_data[tif_file.name]))
 
-        print(f"  Matched {len(images_to_process)} images with drift data")
+        logger.info(f"  Matched {len(images_to_process)} images with drift data")
 
         if len(images_to_process) == 0:
-            print(f"  Error: No images matched with drift data!")
+            logger.error(f"  Error: No images matched with drift data!")
             return None
 
         # Process images in batches
@@ -257,7 +262,8 @@ class BatchGPUAligner:
                     pbar.update(len(batch_items))
 
                 except Exception as e:
-                    print(f"\n  Error processing batch: {e}")
+                    logger.error(f"\n  Error processing batch: {e}")
+                    log_exception(logger, e, "Batch processing error")
                     stats['errors'] += len(batch_items)
                     pbar.update(len(batch_items))
                     continue
@@ -265,13 +271,13 @@ class BatchGPUAligner:
         processing_time = time.time() - start_time
 
         # Print statistics
-        print(f"\n  Set {task['index']} Complete:")
-        print(f"    Processed: {stats['processed']}")
-        print(f"    Skipped: {stats['skipped']}")
-        print(f"    Errors: {stats['errors']}")
-        print(f"    Time: {processing_time:.1f}s")
+        logger.info(f"\n  Set {task['index']} Complete:")
+        logger.info(f"    Processed: {stats['processed']}")
+        logger.info(f"    Skipped: {stats['skipped']}")
+        logger.info(f"    Errors: {stats['errors']}")
+        logger.info(f"    Time: {processing_time:.1f}s")
         if stats['processed'] > 0:
-            print(f"    Speed: {stats['processed']/processing_time:.1f} img/s")
+            logger.info(f"    Speed: {stats['processed']/processing_time:.1f} img/s")
 
         return {
             'task': task,
@@ -419,13 +425,13 @@ class BatchGPUAligner:
 
     def process_all_sets(self):
         """Process all image sets sequentially."""
-        print(f"\n{'='*70}")
-        print(f"STARTING BATCH GPU ALIGNMENT")
-        print(f"{'='*70}")
-        print(f"Total image sets: {len(self.processing_tasks)}")
-        print(f"Processing mode: Sequential (one set at a time)")
-        print(f"Batch size: {self.batch_size}")
-        print(f"Interpolation: {self.interpolation}")
+        logger.info(f"\n{'='*70}")
+        logger.info(f"STARTING BATCH GPU ALIGNMENT")
+        logger.info(f"{'='*70}")
+        logger.info(f"Total image sets: {len(self.processing_tasks)}")
+        logger.info(f"Processing mode: Sequential (one set at a time)")
+        logger.info(f"Batch size: {self.batch_size}")
+        logger.info(f"Interpolation: {self.interpolation}")
 
         total_start = time.time()
         results = []
@@ -443,11 +449,11 @@ class BatchGPUAligner:
         total_time = time.time() - total_start
 
         # Final summary
-        print(f"\n{'='*70}")
-        print(f"BATCH ALIGNMENT COMPLETE")
-        print(f"{'='*70}")
-        print(f"Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
-        print(f"\nSummary by image set:")
+        logger.info(f"\n{'='*70}")
+        logger.info(f"BATCH ALIGNMENT COMPLETE")
+        logger.info(f"{'='*70}")
+        logger.info(f"Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
+        logger.info(f"\nSummary by image set:")
 
         total_processed = 0
         total_skipped = 0
@@ -456,11 +462,11 @@ class BatchGPUAligner:
         for result in results:
             task = result['task']
             stats = result['stats']
-            print(f"\n  Set {task['index']}: {task['folder_name']}")
-            print(f"    Processed: {stats['processed']}")
-            print(f"    Skipped: {stats['skipped']}")
-            print(f"    Errors: {stats['errors']}")
-            print(f"    Output: {task['output_dir']}")
+            logger.info(f"\n  Set {task['index']}: {task['folder_name']}")
+            logger.info(f"    Processed: {stats['processed']}")
+            logger.info(f"    Skipped: {stats['skipped']}")
+            logger.info(f"    Errors: {stats['errors']}")
+            logger.info(f"    Output: {task['output_dir']}")
 
             total_processed += stats['processed']
             total_skipped += stats['skipped']
@@ -544,9 +550,9 @@ def main():
         # User provided JSON path manually
         json_file = Path(remaining[0])
         if not json_file.exists():
-            print(f"Error: File not found: {json_file}")
+            logger.error(f"Error: File not found: {json_file}")
             sys.exit(1)
-        print(f"Using user-specified JSON file: {json_file}")
+        logger.info(f"Using user-specified JSON file: {json_file}")
     else:
         # Try to auto-discover JSON in scripts_output folder (parent directory)
         scripts_output_dir = Path('../scripts_output')
@@ -569,7 +575,7 @@ def main():
             sys.exit(1)
         elif len(json_files) == 1:
             json_file = json_files[0]
-            print(f"Auto-discovered JSON file: {json_file.name}")
+            logger.info(f"Auto-discovered JSON file: {json_file.name}")
         else:
             print(f"Error: Multiple JSON files found in '{scripts_output_dir}/':")
             for jf in json_files:

@@ -38,6 +38,10 @@ import time
 from tqdm import tqdm
 import random
 import string
+from logging_utils import setup_logger, log_worker_message, log_exception
+
+# Setup centralized logger
+logger = setup_logger('Step2_DriftAnalysis')
 
 def gaussian_2d(coords: Tuple[np.ndarray, np.ndarray],
                amp: float, x0: float, y0: float,
@@ -179,23 +183,13 @@ def process_single_image_set(args: Tuple[int, Dict[str, Any], Optional[mp.Queue]
     # Store results for all images
     all_results = []
     total_operations = len(tif_files) * len(selected_particles)
-    operation_count = 0
 
     # Store first frame positions for drift calculation
     first_frame_positions = {}
 
-    # Create progress bar for this worker
-    pbar = tqdm(
-        total=total_operations,
-        desc=f"Set {set_index}: {folder_path.name[:30]}",
-        position=set_index,
-        leave=True,
-        unit="fit",
-        ncols=100,
-        dynamic_ncols=False,
-        miniters=1,
-        mininterval=0.1
-    )
+    # Print start message with timestamp (use log_worker_message for dual output)
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_worker_message(f"[{timestamp}] Set {set_index} ({folder_path.name[:40]}): Starting {total_operations} fits...")
 
     # Process images ONE BY ONE (memory efficient)
     for img_idx, tif_file in enumerate(tif_files):
@@ -203,13 +197,12 @@ def process_single_image_set(args: Tuple[int, Dict[str, Any], Optional[mp.Queue]
             # Load single image
             image = tifffile.imread(str(tif_file))
             if image.ndim != 2:
-                print(f"[Set {set_index}]   Skipping {tif_file.name} - not grayscale")
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                log_worker_message(f"[{timestamp}] Set {set_index}: Skipping {tif_file.name} - not grayscale")
                 continue
 
             # Process each particle in this image
             for particle in selected_particles:
-                operation_count += 1
-
                 bbox = tuple(particle['bbox'])  # [x0, y0, x1, y1]
                 particle_id = particle['particle_id']
 
@@ -265,21 +258,20 @@ def process_single_image_set(args: Tuple[int, Dict[str, Any], Optional[mp.Queue]
 
                 all_results.append(result)
 
-                # Update progress bar
-                pbar.update(1)
-
             # Image processing done - image will be garbage collected
 
         except Exception as e:
-            pbar.write(f"[Set {set_index}] Error processing {tif_file.name}: {e}")
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            log_worker_message(f"[{timestamp}] Set {set_index}: Error processing {tif_file.name}: {e}")
             continue
-
-    # Close progress bar
-    pbar.close()
 
     # Calculate statistics
     successful_fits = sum(1 for r in all_results if r['success'])
     success_rate = (successful_fits / len(all_results) * 100) if all_results else 0
+
+    # Print completion message with timestamp
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_worker_message(f"[{timestamp}] Set {set_index} ({folder_path.name[:40]}): Completed {successful_fits}/{len(all_results)} fits ({success_rate:.1f}%)")
 
     return {
         'set_index': set_index,
@@ -395,7 +387,7 @@ def export_results_to_csv(set_result: Dict[str, Any], output_dir: Path) -> Dict[
 
 def main():
     """Main function to run parallel drift analysis."""
-    print("=== Parallel Drift Analysis ===\n")
+    logger.info("=== Parallel Drift Analysis ===\n")
 
     # Determine JSON file location
     json_file = None
@@ -439,7 +431,7 @@ def main():
             sys.exit(1)
 
     # Load JSON
-    print(f"Loading selections from: {json_file}")
+    logger.info(f"Loading selections from: {json_file}")
     try:
         with open(json_file, 'r') as f:
             data = json.load(f)
@@ -453,17 +445,17 @@ def main():
         print("No image sets found in JSON file!")
         sys.exit(1)
 
-    print(f"Found {len(image_sets)} image set(s) to process\n")
+    logger.info(f"Found {len(image_sets)} image set(s) to process\n")
 
     # Print summary
     for i, img_set in enumerate(image_sets):
-        print(f"Set {i}: {Path(img_set['folder_path']).name}")
-        print(f"  Particles: {len(img_set['selected_particles'])}")
-        print(f"  Folder: {img_set['folder_path']}")
+        logger.info(f"Set {i}: {Path(img_set['folder_path']).name}")
+        logger.info(f"  Particles: {len(img_set['selected_particles'])}")
+        logger.info(f"  Folder: {img_set['folder_path']}")
 
-    print("\n" + "="*60)
-    print("Starting parallel processing...")
-    print("="*60 + "\n")
+    logger.info("\n" + "="*60)
+    logger.info("Starting parallel processing...")
+    logger.info("="*60 + "\n")
 
     # Create argument tuples for each image set (no progress queue needed with tqdm)
     process_args = [
@@ -473,20 +465,25 @@ def main():
 
     # Determine number of workers (one per image set, but cap at CPU count)
     num_workers = min(len(image_sets), mp.cpu_count())
-    print(f"Using {num_workers} parallel workers")
-    print(f"Progress bars will appear below...\n")
+    logger.info(f"Using {num_workers} parallel workers\n")
 
-    # Run parallel processing
+    # Run parallel processing with centralized progress bar
     start_time = time.time()
 
     with Pool(processes=num_workers) as pool:
-        results = pool.map(process_single_image_set, process_args)
+        # Use imap_unordered for better progress tracking
+        results = []
+        with tqdm(total=len(image_sets), desc="Processing image sets", unit="set", ncols=100) as pbar:
+            for result in pool.imap_unordered(process_single_image_set, process_args):
+                results.append(result)
+                pbar.update(1)
 
+    sys.stderr.flush()
     end_time = time.time()
 
-    print("\n" + "="*60)
-    print("Parallel processing complete!")
-    print("="*60 + "\n")
+    logger.info("\n" + "="*60)
+    logger.info("Parallel processing complete!")
+    logger.info("="*60 + "\n")
 
     # Export results to CSV
     # Use scripts_output as base directory (parent directory)
@@ -507,28 +504,28 @@ def main():
                 csv_info_list.append(csv_info)
 
     # Print summary
-    print("\n=== SUMMARY ===")
-    print(f"Total processing time: {end_time - start_time:.2f} seconds")
-    print(f"Image sets processed: {len(results)}")
-    print(f"CSV files created: {len(csv_info_list)}\n")
+    logger.info("\n=== SUMMARY ===")
+    logger.info(f"Total processing time: {end_time - start_time:.2f} seconds")
+    logger.info(f"Image sets processed: {len(results)}")
+    logger.info(f"CSV files created: {len(csv_info_list)}\n")
 
     for result in results:
-        print(f"Set {result['set_index']}: {result['folder_name']}")
+        logger.info(f"Set {result['set_index']}: {result['folder_name']}")
         if result['success']:
-            print(f"  Total fits attempted: {result['total_fits_attempted']}")
-            print(f"  Successful fits: {result['successful_fits']}")
-            print(f"  Success rate: {result['success_rate']:.1f}%")
+            logger.info(f"  Total fits attempted: {result['total_fits_attempted']}")
+            logger.info(f"  Successful fits: {result['successful_fits']}")
+            logger.info(f"  Success rate: {result['success_rate']:.1f}%")
         else:
-            print(f"  ERROR: {result.get('error', 'Unknown error')}")
-        print()
+            logger.error(f"  ERROR: {result.get('error', 'Unknown error')}")
+        logger.info("")
 
-    print("All CSV files saved to:")
+    logger.info("All CSV files saved to:")
     for csv_info in csv_info_list:
-        print(f"  {csv_info['csv_file_name']}")
+        logger.info(f"  {csv_info['csv_file_name']}")
 
     # Update JSON file with CSV information
     if csv_info_list:
-        print("\nUpdating JSON file with CSV information...")
+        logger.info("\nUpdating JSON file with CSV information...")
         try:
             # Map CSV info by set_index for easy lookup
             csv_info_by_index = {info['set_index']: info for info in csv_info_list}
@@ -545,13 +542,14 @@ def main():
             with open(json_file, 'w') as f:
                 json.dump(data, f, indent=2)
 
-            print(f"✓ JSON file updated: {json_file.name}")
-            print("  Added 'csv_file_path' and 'csv_file_name' to each image set")
+            logger.info(f"✓ JSON file updated: {json_file.name}")
+            logger.info("  Added 'csv_file_path' and 'csv_file_name' to each image set")
 
         except Exception as e:
-            print(f"Warning: Could not update JSON file: {e}")
+            logger.error(f"Warning: Could not update JSON file: {e}")
+            log_exception(logger, e, "JSON update error")
 
-    print("\n=== DONE ===")
+    logger.info("\n=== DONE ===")
 
 if __name__ == "__main__":
     main()

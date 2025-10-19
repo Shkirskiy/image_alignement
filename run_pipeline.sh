@@ -48,7 +48,7 @@ if [ $STEP1_EXIT_CODE -ne 0 ]; then
 fi
 
 # Find the JSON file created by step 1
-JSON_FILE=$(find scripts_output -maxdepth 1 -name "particle_selections_*.json" -type f 2>/dev/null | head -n 1)
+JSON_FILE=$(find scripts_output -maxdepth 1 -name "particle_selections.json" -type f 2>/dev/null | head -n 1)
 
 if [ -z "$JSON_FILE" ]; then
     echo ""

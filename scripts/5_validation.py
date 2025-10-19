@@ -48,6 +48,10 @@ from multiprocessing import Pool
 from typing import Dict, Any, Tuple, Optional, List
 from scipy.optimize import curve_fit
 import tifffile
+from logging_utils import setup_logger, log_worker_message, log_exception
+
+# Setup centralized logger
+logger = setup_logger('Step5_Validation')
 import random
 import string
 
@@ -263,23 +267,13 @@ def validate_aligned_image_set(args: Tuple[int, Dict[str, Any], Optional[mp.Queu
     # Store results for all images
     all_results = []
     total_operations = len(tif_files) * len(selected_particles)
-    operation_count = 0
 
     # Store first frame positions for drift calculation
     first_frame_positions = {}
 
-    # Create progress bar for this worker
-    pbar = tqdm(
-        total=total_operations,
-        desc=f"Set {set_index}: Validating {folder_name[:30]}",
-        position=set_index,
-        leave=True,
-        unit="fit",
-        ncols=100,
-        dynamic_ncols=False,
-        miniters=1,
-        mininterval=0.1
-    )
+    # Print start message with timestamp
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_worker_message(f"[{timestamp}] Set {set_index} (Validation: {folder_name[:40]}): Starting {total_operations} fits...")
 
     # Process aligned images ONE BY ONE (memory efficient)
     for img_idx, tif_file in enumerate(tif_files):
@@ -294,13 +288,12 @@ def validate_aligned_image_set(args: Tuple[int, Dict[str, Any], Optional[mp.Queu
                 image = image.squeeze()  # Handle channel-first format
 
             if image.ndim != 2:
-                pbar.write(f"[Set {set_index}]   Skipping {tif_file.name} - not grayscale (shape: {image.shape})")
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                log_worker_message(f"[{timestamp}] Set {set_index}: Skipping {tif_file.name} - not grayscale (shape: {image.shape})")
                 continue
 
             # Process each particle in this image
             for particle in selected_particles:
-                operation_count += 1
-
                 bbox = tuple(particle['bbox'])  # [x0, y0, x1, y1]
                 particle_id = particle['particle_id']
 
@@ -356,21 +349,20 @@ def validate_aligned_image_set(args: Tuple[int, Dict[str, Any], Optional[mp.Queu
 
                 all_results.append(result)
 
-                # Update progress bar
-                pbar.update(1)
-
             # Image processing done - image will be garbage collected
 
         except Exception as e:
-            pbar.write(f"[Set {set_index}] Error processing {tif_file.name}: {e}")
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            log_worker_message(f"[{timestamp}] Set {set_index}: Error processing {tif_file.name}: {e}")
             continue
-
-    # Close progress bar
-    pbar.close()
 
     # Calculate statistics
     successful_fits = sum(1 for r in all_results if r['success'])
     success_rate = (successful_fits / len(all_results) * 100) if all_results else 0
+
+    # Print completion message with timestamp
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_worker_message(f"[{timestamp}] Set {set_index} (Validation: {folder_name[:40]}): Completed {successful_fits}/{len(all_results)} fits ({success_rate:.1f}%)")
 
     return {
         'set_index': set_index,
@@ -494,18 +486,9 @@ def aggregate_validation_drift(args: Tuple[str, str, Path, int]) -> Optional[Dic
     csv_file_path, csv_file_name, output_dir, set_index = args
     csv_file = Path(csv_file_path)
 
-    # Create progress bar for this worker
-    pbar = tqdm(
-        total=1,
-        desc=f"Set {set_index}: Aggregating {csv_file_name[:40]}",
-        position=set_index,
-        leave=True,
-        unit="file",
-        ncols=100,
-        dynamic_ncols=False,
-        miniters=1,
-        mininterval=0.1
-    )
+    # Print start message with timestamp
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_worker_message(f"[{timestamp}] Set {set_index}: Aggregating validation data for {csv_file_name[:50]}...")
 
     try:
         # Read CSV
@@ -516,20 +499,22 @@ def aggregate_validation_drift(args: Tuple[str, str, Path, int]) -> Optional[Dic
                         'drift_x', 'drift_y']
         missing_cols = [col for col in required_cols if col not in df.columns]
         if missing_cols:
-            pbar.write(f"[Set {set_index}] Error: Missing columns: {missing_cols}")
-            pbar.close()
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            log_worker_message(f"[{timestamp}] Set {set_index}: Error - Missing columns: {missing_cols}")
             return None
 
-        pbar.write(f"[Set {set_index}] Loaded {len(df)} records, {df['image_index'].max() + 1} images")
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Loaded {len(df)} records, {df['image_index'].max() + 1} images")
 
         # Filter only successful fits
         df_success = df[df['success'] == True].copy()
         success_rate = len(df_success) / len(df) * 100 if len(df) > 0 else 0
-        pbar.write(f"[Set {set_index}] Successful fits: {len(df_success)}/{len(df)} ({success_rate:.1f}%)")
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Successful fits: {len(df_success)}/{len(df)} ({success_rate:.1f}%)")
 
         if len(df_success) == 0:
-            pbar.write(f"[Set {set_index}] Error: No successful fits found!")
-            pbar.close()
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            log_worker_message(f"[{timestamp}] Set {set_index}: Error - No successful fits found!")
             return None
 
         aggregated_data = []
@@ -546,7 +531,8 @@ def aggregate_validation_drift(args: Tuple[str, str, Path, int]) -> Optional[Dic
             img_data = df_success[df_success['filename'] == filename]
 
             if len(img_data) == 0:
-                pbar.write(f"[Set {set_index}] Warning: No successful fits for image {idx} ({filename})")
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                log_worker_message(f"[{timestamp}] Set {set_index}: Warning - No successful fits for image {idx} ({filename})")
                 continue
 
             # Count particles used
@@ -557,7 +543,8 @@ def aggregate_validation_drift(args: Tuple[str, str, Path, int]) -> Optional[Dic
 
             # Check minimum particle count for reliable statistics
             if n_particles < 2:
-                pbar.write(f"[Set {set_index}] Warning: Only {n_particles} particle(s) in image {idx}")
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                log_worker_message(f"[{timestamp}] Set {set_index}: Warning - Only {n_particles} particle(s) in image {idx}")
 
             # Extract particle positions for rotation calculation
             particle_ids = img_data['particle_id'].values
@@ -618,7 +605,8 @@ def aggregate_validation_drift(args: Tuple[str, str, Path, int]) -> Optional[Dic
 
                 else:
                     # Not enough matched particles - fall back to simple median
-                    pbar.write(f"[Set {set_index}] Warning: Only {len(matched_ref_pos)} matched particle(s)")
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    log_worker_message(f"[{timestamp}] Set {set_index}: Warning - Only {len(matched_ref_pos)} matched particle(s)")
                     median_drift_x = img_data['drift_x'].median()
                     median_drift_y = img_data['drift_y'].median()
                     rotation_degrees = 0.0
@@ -652,15 +640,12 @@ def aggregate_validation_drift(args: Tuple[str, str, Path, int]) -> Optional[Dic
         df_agg.to_csv(output_file, index=False)
 
         # Print statistics
-        pbar.write(f"[Set {set_index}] ✓ Aggregated CSV: {output_file.name}")
-        pbar.write(f"[Set {set_index}]   Images: {len(df_agg)}, Avg particles/image: {df_agg['n_particles_used'].mean():.1f}")
-        pbar.write(f"[Set {set_index}]   Residual Drift X: {df_agg['dx_pixels'].min():.4f} to {df_agg['dx_pixels'].max():.4f} px")
-        pbar.write(f"[Set {set_index}]   Residual Drift Y: {df_agg['dy_pixels'].min():.4f} to {df_agg['dy_pixels'].max():.4f} px")
-        pbar.write(f"[Set {set_index}]   Residual Rotation: {df_agg['rotation_degrees'].min():.6f} to {df_agg['rotation_degrees'].max():.6f}°")
-
-        # Update progress bar
-        pbar.update(1)
-        pbar.close()
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Aggregated CSV: {output_file.name}")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Images: {len(df_agg)}, Avg particles/image: {df_agg['n_particles_used'].mean():.1f}")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Residual Drift X: {df_agg['dx_pixels'].min():.4f} to {df_agg['dx_pixels'].max():.4f} px")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Residual Drift Y: {df_agg['dy_pixels'].min():.4f} to {df_agg['dy_pixels'].max():.4f} px")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Residual Rotation: {df_agg['rotation_degrees'].min():.6f} to {df_agg['rotation_degrees'].max():.6f}°")
 
         # Return dictionary with output info
         return {
@@ -672,10 +657,10 @@ def aggregate_validation_drift(args: Tuple[str, str, Path, int]) -> Optional[Dic
         }
 
     except Exception as e:
-        pbar.write(f"[Set {set_index}] Error aggregating {csv_file.name}: {e}")
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Error aggregating {csv_file.name}: {e}")
         import traceback
         traceback.print_exc()
-        pbar.close()
         return None
 
 def plot_validation_comparison(original_csv_path: Path, validation_csv_path: Path,
@@ -814,7 +799,7 @@ def plot_validation_comparison(original_csv_path: Path, validation_csv_path: Pat
 
 def main():
     """Main function to run validation analysis."""
-    print("=== Validation of Aligned Images ===\n")
+    logger.info("=== Validation of Aligned Images ===\n")
 
     # Determine JSON file location (identical logic to other scripts)
     json_file = None
@@ -856,7 +841,7 @@ def main():
             sys.exit(1)
 
     # Load JSON
-    print(f"Loading configuration from: {json_file}")
+    logger.info(f"Loading configuration from: {json_file}")
     try:
         with open(json_file, 'r') as f:
             data = json.load(f)
@@ -890,7 +875,7 @@ def main():
         print("\nPlease run script 4 (batch_gpu_alignment.py) first to create aligned images.")
         sys.exit(1)
 
-    print(f"Found {len(valid_sets)} aligned image set(s) to validate\n")
+    logger.info(f"Found {len(valid_sets)} aligned image set(s) to validate\n")
 
     # Print summary
     for i, img_set in valid_sets:
@@ -898,9 +883,9 @@ def main():
         print(f"  Aligned folder: {img_set['aligned_folder_path']}")
         print(f"  Particles: {len(img_set['selected_particles'])}")
 
-    print("\n" + "="*60)
-    print("Step 1: Validating aligned images (Gaussian fitting)...")
-    print("="*60 + "\n")
+    logger.info("\n" + "="*60)
+    logger.info("Step 1: Validating aligned images (Gaussian fitting)...")
+    logger.info("="*60 + "\n")
 
     # Create argument tuples for parallel processing
     process_args = [
@@ -910,20 +895,25 @@ def main():
 
     # Determine number of workers
     num_workers = min(len(valid_sets), mp.cpu_count())
-    print(f"Using {num_workers} parallel workers\n")
+    logger.info(f"Using {num_workers} parallel workers\n")
 
-    # Run parallel validation processing
+    # Run parallel validation processing with centralized progress bar
     import time
     start_time = time.time()
 
     with Pool(processes=num_workers) as pool:
-        val_results = pool.map(validate_aligned_image_set, process_args)
+        # Use imap_unordered for better progress tracking
+        val_results = []
+        with tqdm(total=len(valid_sets), desc="Validating aligned images", unit="set", ncols=100, file=sys.stderr) as pbar:
+            for result in pool.imap_unordered(validate_aligned_image_set, process_args):
+                val_results.append(result)
+                pbar.update(1)
 
     end_time = time.time()
 
-    print("\n" + "="*60)
-    print("Step 1 complete: Gaussian fitting on aligned images")
-    print("="*60 + "\n")
+    logger.info("\n" + "="*60)
+    logger.info("Step 1 complete: Gaussian fitting on aligned images")
+    logger.info("="*60 + "\n")
 
     # Export validation results to CSV (parent directory)
     output_dir = Path('../scripts_output')
@@ -936,9 +926,9 @@ def main():
                 csv_info['set_index'] = val_result['set_index']
                 validation_csv_info_list.append(csv_info)
 
-    print("\n" + "="*60)
-    print("Step 2: Aggregating validation drift data...")
-    print("="*60 + "\n")
+    logger.info("\n" + "="*60)
+    logger.info("Step 2: Aggregating validation drift data...")
+    logger.info("="*60 + "\n")
 
     # Create argument tuples for aggregation
     aggregation_args = [
@@ -947,13 +937,18 @@ def main():
         for info in validation_csv_info_list
     ]
 
-    # Run parallel aggregation
+    # Run parallel aggregation with centralized progress bar
     with Pool(processes=num_workers) as pool:
-        agg_results = pool.map(aggregate_validation_drift, aggregation_args)
+        # Use imap_unordered for better progress tracking
+        agg_results = []
+        with tqdm(total=len(aggregation_args), desc="Aggregating validation drift", unit="file", ncols=100, file=sys.stderr) as pbar:
+            for result in pool.imap_unordered(aggregate_validation_drift, aggregation_args):
+                agg_results.append(result)
+                pbar.update(1)
 
-    print("\n" + "="*60)
-    print("Step 2 complete: Aggregation finished")
-    print("="*60 + "\n")
+    logger.info("\n" + "="*60)
+    logger.info("Step 2 complete: Aggregation finished")
+    logger.info("="*60 + "\n")
 
     # Filter successful aggregation results
     successful_agg = [r for r in agg_results if r is not None]
@@ -989,12 +984,12 @@ def main():
                 print(f"[Set {set_index}] ✓ Validation plot: {plot_file.name}")
 
     # Print final summary
-    print("\n" + "="*60)
-    print("VALIDATION SUMMARY")
-    print("="*60 + "\n")
-    print(f"Total processing time: {end_time - start_time:.2f} seconds")
-    print(f"Image sets validated: {len(val_results)}")
-    print(f"Successful validations: {len(successful_agg)}\n")
+    logger.info("\n" + "="*60)
+    logger.info("VALIDATION SUMMARY")
+    logger.info("="*60 + "\n")
+    logger.info(f"Total processing time: {end_time - start_time:.2f} seconds")
+    logger.info(f"Image sets validated: {len(val_results)}")
+    logger.info(f"Successful validations: {len(successful_agg)}\n")
 
     for val_result in val_results:
         if val_result['success']:
@@ -1040,10 +1035,10 @@ def main():
         except Exception as e:
             print(f"Warning: Could not update JSON file: {e}")
 
-    print(f"\nValidation files saved to: {output_dir / 'validation'}")
-    print("\n=== VALIDATION COMPLETE ===")
-    print("\nIf residual drift is near zero (< 0.1 px) and rotation is near zero (< 0.01°),")
-    print("then the alignment was successful!")
+    logger.info(f"\nValidation files saved to: {output_dir / 'validation'}")
+    logger.info("\n=== VALIDATION COMPLETE ===")
+    logger.info("\nIf residual drift is near zero (< 0.1 px) and rotation is near zero (< 0.01°),")
+    logger.info("then the alignment was successful!")
 
 if __name__ == "__main__":
     main()

@@ -41,6 +41,10 @@ import json
 import multiprocessing as mp
 from multiprocessing import Pool
 from typing import Dict, Any, Tuple, Optional, List
+from logging_utils import setup_logger, log_worker_message, log_exception
+
+# Setup centralized logger
+logger = setup_logger('Step3_AggregateDrift')
 
 def plot_drift_data(df_agg, output_dir, folder_name):
     """
@@ -200,15 +204,9 @@ def aggregate_particle_drift(args: Tuple[str, str, Path, int]) -> Optional[Dict[
     csv_file_path, csv_file_name, output_dir, set_index = args
     csv_file = Path(csv_file_path)
 
-    # Create progress bar for this worker
-    pbar = tqdm(
-        total=1,
-        desc=f"Set {set_index}: {csv_file_name[:40]}",
-        position=set_index,
-        leave=True,
-        unit="file",
-        ncols=100
-    )
+    # Print start message with timestamp
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_worker_message(f"[{timestamp}] Set {set_index}: Processing {csv_file_name[:50]}...")
 
     try:
         # Read CSV
@@ -219,20 +217,22 @@ def aggregate_particle_drift(args: Tuple[str, str, Path, int]) -> Optional[Dict[
                         'drift_x', 'drift_y', 'rotation_angle']
         missing_cols = [col for col in required_cols if col not in df.columns]
         if missing_cols:
-            pbar.write(f"[Set {set_index}] Error: Missing columns: {missing_cols}")
-            pbar.close()
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            log_worker_message(f"[{timestamp}] Set {set_index}: Error - Missing columns: {missing_cols}")
             return None
 
-        pbar.write(f"[Set {set_index}] Loaded {len(df)} records, {df['image_index'].max() + 1} images, {df['particle_id'].nunique()} particles")
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Loaded {len(df)} records, {df['image_index'].max() + 1} images, {df['particle_id'].nunique()} particles")
 
         # Filter only successful fits
         df_success = df[df['success'] == True].copy()
         success_rate = len(df_success) / len(df) * 100 if len(df) > 0 else 0
-        pbar.write(f"[Set {set_index}] Successful fits: {len(df_success)}/{len(df)} ({success_rate:.1f}%)")
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Successful fits: {len(df_success)}/{len(df)} ({success_rate:.1f}%)")
 
         if len(df_success) == 0:
-            pbar.write(f"[Set {set_index}] Error: No successful fits found!")
-            pbar.close()
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            log_worker_message(f"[{timestamp}] Set {set_index}: Error - No successful fits found!")
             return None
 
         aggregated_data = []
@@ -250,7 +250,8 @@ def aggregate_particle_drift(args: Tuple[str, str, Path, int]) -> Optional[Dict[
 
             if len(img_data) == 0:
                 # No successful particles for this image - skip or use NaN
-                pbar.write(f"[Set {set_index}] Warning: No successful fits for image {idx} ({filename})")
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                log_worker_message(f"[{timestamp}] Set {set_index}: Warning - No successful fits for image {idx} ({filename})")
                 continue
 
             # Count particles used
@@ -261,7 +262,8 @@ def aggregate_particle_drift(args: Tuple[str, str, Path, int]) -> Optional[Dict[
 
             # Check minimum particle count for reliable statistics
             if n_particles < 2:
-                pbar.write(f"[Set {set_index}] Warning: Only {n_particles} particle(s) in image {idx} - rotation may be unreliable")
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                log_worker_message(f"[{timestamp}] Set {set_index}: Warning - Only {n_particles} particle(s) in image {idx}, rotation may be unreliable")
 
             # Extract particle positions for rotation calculation
             particle_ids = img_data['particle_id'].values
@@ -324,7 +326,8 @@ def aggregate_particle_drift(args: Tuple[str, str, Path, int]) -> Optional[Dict[
 
                 else:
                     # Not enough matched particles - fall back to simple median
-                    pbar.write(f"[Set {set_index}] Warning: Only {len(matched_ref_pos)} matched particle(s) in image {idx} - using simple drift")
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    log_worker_message(f"[{timestamp}] Set {set_index}: Warning - Only {len(matched_ref_pos)} matched particle(s) in image {idx}, using simple drift")
                     median_drift_x = img_data['drift_x'].median()
                     median_drift_y = img_data['drift_y'].median()
                     rotation_degrees = 0.0
@@ -360,21 +363,20 @@ def aggregate_particle_drift(args: Tuple[str, str, Path, int]) -> Optional[Dict[
         df_agg.to_csv(output_file, index=False)
 
         # Print statistics
-        pbar.write(f"[Set {set_index}] ✓ Saved CSV: {output_file.name}")
-        pbar.write(f"[Set {set_index}]   Images: {len(df_agg)}, Avg particles/image: {df_agg['n_particles_used'].mean():.1f}")
-        pbar.write(f"[Set {set_index}]   Drift X: {df_agg['dx_pixels'].min():.2f} to {df_agg['dx_pixels'].max():.2f} px")
-        pbar.write(f"[Set {set_index}]   Drift Y: {df_agg['dy_pixels'].min():.2f} to {df_agg['dy_pixels'].max():.2f} px")
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Saved CSV: {output_file.name}")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Images: {len(df_agg)}, Avg particles/image: {df_agg['n_particles_used'].mean():.1f}")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Drift X: {df_agg['dx_pixels'].min():.2f} to {df_agg['dx_pixels'].max():.2f} px")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Drift Y: {df_agg['dy_pixels'].min():.2f} to {df_agg['dy_pixels'].max():.2f} px")
 
         # Generate drift plot with updated naming
         try:
             plot_file = plot_drift_data(df_agg, output_dir, base_name)
-            pbar.write(f"[Set {set_index}] ✓ Saved plot: {plot_file.name}")
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            log_worker_message(f"[{timestamp}] Set {set_index}: Saved plot: {plot_file.name}")
         except Exception as e:
-            pbar.write(f"[Set {set_index}] Warning: Could not create plot: {e}")
-
-        # Update progress bar
-        pbar.update(1)
-        pbar.close()
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            log_worker_message(f"[{timestamp}] Set {set_index}: Warning - Could not create plot: {e}")
 
         # Return dictionary with output info
         return {
@@ -384,10 +386,10 @@ def aggregate_particle_drift(args: Tuple[str, str, Path, int]) -> Optional[Dict[
         }
 
     except Exception as e:
-        pbar.write(f"[Set {set_index}] Error processing {csv_file.name}: {e}")
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_worker_message(f"[{timestamp}] Set {set_index}: Error processing {csv_file.name}: {e}")
         import traceback
         traceback.print_exc()
-        pbar.close()
         return None
 
 def plot_summary_all_sets(csv_files, output_dir):
@@ -463,7 +465,7 @@ def plot_summary_all_sets(csv_files, output_dir):
 
 def main():
     """Main function to run aggregate particle drift analysis."""
-    print("=== Aggregate Particle Drift Data ===\n")
+    logger.info("=== Aggregate Particle Drift Data ===\n")
 
     # Determine JSON file location (identical logic to parallel_drift_analysis.py)
     json_file = None
@@ -507,7 +509,7 @@ def main():
             sys.exit(1)
 
     # Load JSON
-    print(f"Loading selections from: {json_file}")
+    logger.info(f"Loading selections from: {json_file}")
     try:
         with open(json_file, 'r') as f:
             data = json.load(f)
@@ -546,20 +548,20 @@ def main():
         print("Error: No valid CSV files found in JSON!")
         sys.exit(1)
 
-    print(f"Found {len(csv_info_list)} CSV file(s) to process\n")
+    logger.info(f"Found {len(csv_info_list)} CSV file(s) to process\n")
 
     # Print summary
     for info in csv_info_list:
-        print(f"Set {info['set_index']}: {info['csv_file_name']}")
+        logger.info(f"Set {info['set_index']}: {info['csv_file_name']}")
 
     # Create output directory (parent directory)
     output_dir = Path('../scripts_output') / 'particle_drift'
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nOutput directory: {output_dir}")
-    print("\n" + "="*60)
-    print("Starting parallel processing...")
-    print("="*60 + "\n")
+    logger.info(f"\nOutput directory: {output_dir}")
+    logger.info("\n" + "="*60)
+    logger.info("Starting parallel processing...")
+    logger.info("="*60 + "\n")
 
     # Create argument tuples for parallel processing
     process_args = [
@@ -569,53 +571,58 @@ def main():
 
     # Determine number of workers
     num_workers = min(len(csv_info_list), mp.cpu_count())
-    print(f"Using {num_workers} parallel workers")
-    print(f"Progress bars will appear below...\n")
+    logger.info(f"Using {num_workers} parallel workers\n")
 
-    # Run parallel processing
+    # Run parallel processing with centralized progress bar
     import time
     start_time = time.time()
 
     with Pool(processes=num_workers) as pool:
-        results = pool.map(aggregate_particle_drift, process_args)
+        # Use imap_unordered for better progress tracking
+        results = []
+        with tqdm(total=len(csv_info_list), desc="Aggregating drift data", unit="file", ncols=100, file=sys.stderr) as pbar:
+            for result in pool.imap_unordered(aggregate_particle_drift, process_args):
+                results.append(result)
+                pbar.update(1)
 
     end_time = time.time()
 
-    print("\n" + "="*60)
-    print("Parallel processing complete!")
-    print("="*60 + "\n")
+    logger.info("\n" + "="*60)
+    logger.info("Parallel processing complete!")
+    logger.info("="*60 + "\n")
 
     # Separate successful and failed results
     successful_outputs = [r for r in results if r is not None]
     failed_count = len(results) - len(successful_outputs)
 
     # Summary
-    print("=== SUMMARY ===")
-    print(f"Total processing time: {end_time - start_time:.2f} seconds")
-    print(f"Files processed: {len(results)}")
-    print(f"Successful: {len(successful_outputs)}")
-    print(f"Failed: {failed_count}\n")
+    logger.info("=== SUMMARY ===")
+    logger.info(f"Total processing time: {end_time - start_time:.2f} seconds")
+    logger.info(f"Files processed: {len(results)}")
+    logger.info(f"Successful: {len(successful_outputs)}")
+    logger.info(f"Failed: {failed_count}\n")
 
     if successful_outputs:
-        print("Generated drift analysis files:")
+        logger.info("Generated drift analysis files:")
         for result in successful_outputs:
-            print(f"  ✓ {result['output_csv_name']}")
+            logger.info(f"  ✓ {result['output_csv_name']}")
 
     # Create summary plot if multiple sets were processed
     if len(successful_outputs) > 1:
-        print(f"\nCreating summary plot for all {len(successful_outputs)} sets...")
+        logger.info(f"\nCreating summary plot for all {len(successful_outputs)} sets...")
         try:
             # Get list of output CSV paths for plotting
             output_csv_paths = [Path(r['output_csv_path']) for r in successful_outputs]
             summary_plot = plot_summary_all_sets(output_csv_paths, output_dir)
             if summary_plot:
-                print(f"  ✓ Summary plot saved: {summary_plot.name}")
+                logger.info(f"  ✓ Summary plot saved: {summary_plot.name}")
         except Exception as e:
-            print(f"  Warning: Could not create summary plot: {e}")
+            logger.error(f"  Warning: Could not create summary plot: {e}")
+            log_exception(logger, e, "Summary plot error")
 
     # Update JSON file with drift CSV information
     if successful_outputs:
-        print("\nUpdating JSON file with drift CSV information...")
+        logger.info("\nUpdating JSON file with drift CSV information...")
         try:
             # Map output info by set_index
             output_info_by_index = {r['set_index']: r for r in successful_outputs}
@@ -632,14 +639,15 @@ def main():
             with open(json_file, 'w') as f:
                 json.dump(data, f, indent=2)
 
-            print(f"✓ JSON file updated: {json_file.name}")
-            print("  Added 'drift_csv_file_path' and 'drift_csv_file_name' to each image set")
+            logger.info(f"✓ JSON file updated: {json_file.name}")
+            logger.info("  Added 'drift_csv_file_path' and 'drift_csv_file_name' to each image set")
 
         except Exception as e:
-            print(f"Warning: Could not update JSON file: {e}")
+            logger.error(f"Warning: Could not update JSON file: {e}")
+            log_exception(logger, e, "JSON update error")
 
-    print(f"\nOutput directory: {output_dir}")
-    print("\n=== DONE ===")
+    logger.info(f"\nOutput directory: {output_dir}")
+    logger.info("\n=== DONE ===")
 
     return failed_count == 0
 
