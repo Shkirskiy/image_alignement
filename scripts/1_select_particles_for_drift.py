@@ -34,8 +34,8 @@ from datetime import datetime
 from magicgui import magic_factory
 from logging_utils import setup_logger, log_exception
 
-# Setup centralized logger
-logger = setup_logger('Step1_ParticleSelection')
+# Logger will be set up after directory selection to use correct path
+logger = None
 
 class ParticleSelector:
     """
@@ -62,6 +62,9 @@ class ParticleSelector:
 
         # Store save button widget for dynamic updates
         self.save_widget = None
+
+        # Store JSON file path for output at end
+        self.json_file_path = None
 
     def select_directory(self) -> bool:
         """Select directory containing TIF files."""
@@ -97,6 +100,12 @@ class ParticleSelector:
             return False
 
         self.tif_files.sort()
+        
+        # Setup logger now that we know the directory location
+        global logger
+        log_dir = self.directory_path.parent / "script_output"
+        logger = setup_logger('Step1_ParticleSelection', log_dir=str(log_dir))
+        
         logger.info(f"\nFound {len(self.tif_files)} TIF files in:")
         logger.info(f"  {self.directory_path}")
         for f in self.tif_files[:5]:
@@ -345,33 +354,14 @@ class ParticleSelector:
         if self.save_widget is not None:
             count = len(self.validated_particles)
             particle_word = "particle" if count == 1 else "particles"
-            self.save_widget.call_button.text = f"Save Selection ({count} {particle_word})"
+            self.save_widget.call_button.text = f"Save & Exit ({count} {particle_word})"
 
     def create_save_button(self):
         """Create save button widget."""
-        @magic_factory(call_button="Save Selection (0 particles)")
+        @magic_factory(call_button="Save & Exit (0 particles)")
         def save_callback(selector=self):
-            selector.save_current_selection()
-
-            # Ask if user wants to add another set
-            reply = QMessageBox.question(
-                None,
-                'Add Another Image Set?',
-                'Do you want to add another image set?',
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-
-            if reply == QMessageBox.Yes:
-                # Close current viewer and restart (deferred to avoid widget deletion errors)
-                if selector.viewer:
-                    # Use QTimer to defer the close until after callback completes
-                    QTimer.singleShot(0, lambda: (
-                        selector.viewer.close(),
-                        selector.run_selection_session()
-                    ))
-            else:
-                # Export all to JSON and exit (deferred to avoid widget deletion errors)
+            if selector.save_current_selection():
+                # Export to JSON and exit (deferred to avoid widget deletion errors)
                 selector.export_all_to_json()
                 if selector.viewer:
                     # Use QTimer to defer the close until after callback completes
@@ -411,71 +401,32 @@ class ParticleSelector:
         return widget
 
     def export_all_to_json(self, auto_save=False):
-        """Export all image sets to JSON file automatically.
+        """Export single image set to JSON file.
         
-        Uses a single fixed filename and merges with existing data if present.
+        Overwrites any existing file with the current selection.
 
         Args:
             auto_save: If True, this is an automatic save on window close
         """
         if not self.all_image_sets:
             if not auto_save:
-                print("No image sets to export!")
+                print("No image set to export!")
             return None
 
-        # Create scripts_output folder in parent directory
-        output_dir = Path.cwd().parent / "scripts_output"
+        # Create script_output folder next to the image directory
+        # e.g., if images are in /path/to/images/exported/, create /path/to/images/script_output/
+        output_dir = self.directory_path.parent / "script_output"
         output_dir.mkdir(exist_ok=True)
 
         # Use fixed filename (no timestamp)
         filename = output_dir / "particle_selections.json"
 
-        # Check if file already exists and load it
-        existing_data = {'image_sets': [], 'total_sets': 0}
-        if filename.exists():
-            try:
-                with open(filename, 'r') as f:
-                    existing_data = json.load(f)
-                logger.info(f"\n=== UPDATING EXISTING FILE ===")
-                logger.info(f"  Found existing file with {len(existing_data.get('image_sets', []))} image set(s)")
-            except Exception as e:
-                print(f"\n=== WARNING: Could not read existing file ===")
-                print(f"  Error: {e}")
-                print(f"  Creating new file instead...")
-                existing_data = {'image_sets': [], 'total_sets': 0}
-
-        # Check for duplicates before merging
-        existing_sets = existing_data.get('image_sets', [])
-        existing_folders = {img_set['folder_path']: idx for idx, img_set in enumerate(existing_sets)}
-        
-        # Merge, replacing duplicates with newer versions
-        merged_sets = existing_sets.copy()
-        new_count = 0
-        replaced_count = 0
-        
-        for new_set in self.all_image_sets:
-            folder_path = new_set['folder_path']
-            
-            if folder_path in existing_folders:
-                # Replace existing entry with newer one
-                idx = existing_folders[folder_path]
-                merged_sets[idx] = new_set
-                replaced_count += 1
-                logger.info(f"  Replacing existing entry for: {Path(folder_path).name}")
-            else:
-                # Add new entry
-                merged_sets.append(new_set)
-                new_count += 1
-        
-        if replaced_count > 0:
-            logger.info(f"  Replaced {replaced_count} existing folder(s) with updated particles")
-        if new_count > 0:
-            logger.info(f"  Added {new_count} new folder(s)")
+        # For single image set workflow, just use the first (and only) set
+        image_set_data = self.all_image_sets[0]
 
         output_data = {
-            'image_sets': merged_sets,
-            'total_sets': len(merged_sets),
-            'created': existing_data.get('created', datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            'image_set': image_set_data,
+            'created': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'last_modified': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
@@ -489,11 +440,12 @@ class ParticleSelector:
             else:
                 logger.info(f"\n=== EXPORT SUCCESSFUL ===")
 
-            logger.info(f"  Saved to: {filename.name}")
-            logger.info(f"  Total image sets in file: {len(merged_sets)}")
-            logger.info(f"  New sets added in this session: {len(self.all_image_sets)}")
-            for i, img_set in enumerate(self.all_image_sets, 1):
-                logger.info(f"  New Set {i}: {Path(img_set['folder_path']).name} ({len(img_set['selected_particles'])} particles)")
+            logger.info(f"  Saved to: {filename}")
+            logger.info(f"  Image folder: {Path(image_set_data['folder_path']).name}")
+            logger.info(f"  Selected particles: {len(image_set_data['selected_particles'])}")
+
+            # Store the JSON file path for output at end
+            self.json_file_path = str(filename.absolute())
 
             return filename
 
@@ -587,8 +539,7 @@ class ParticleSelector:
         logger.info("3. GREEN points = successful fit (SAVED)")
         logger.info("4. RED X = failed fit (REJECTED)")
         logger.info("5. Click 'Undo Last Particle' to remove most recent selection")
-        logger.info("6. Click 'Save Selection' when done")
-        logger.info("7. Choose to add more image sets or finish")
+        logger.info("6. Click 'Save & Exit' when done with particle selection")
         logger.info("\nNOTE: Your work will be auto-saved if you close the window!")
 
     def run_selection_session(self):
@@ -627,11 +578,15 @@ class ParticleSelector:
 
     def run(self):
         """Main entry point."""
-        logger.info("=== Particle Selection for Drift Analysis ===")
-        logger.info("This tool helps you select particles for drift tracking.")
-        logger.info("Only validated selections (successful Gaussian fits) are saved.\n")
+        print("=== Particle Selection for Drift Analysis ===")
+        print("This tool helps you select particles for drift tracking.")
+        print("Only validated selections (successful Gaussian fits) are saved.\n")
 
         self.run_selection_session()
+
+        # Output JSON path for shell script to capture
+        if self.json_file_path:
+            print(f"JSON_PATH={self.json_file_path}")
 
 def main():
     """Main function."""

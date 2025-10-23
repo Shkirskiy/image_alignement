@@ -28,27 +28,28 @@ A detailed technical description of the pipeline is provided below.
 ## Project Structure
 
 ```
-image_alignement/
+image_alignmenetv2/
 ├── scripts/                          # All Python scripts
 │   ├── 1_select_particles_for_drift.py
-│   ├── 2_parallel_drift_analysis.py
-│   ├── 3_aggregate_particle_drift.py
-│   ├── 4_batch_gpu_alignment.py
+│   ├── 2_drift_analysis.py
+│   ├── 3_interactive_trajectory_selector.py
+│   ├── 4_align_images_by_drift.py
 │   ├── 5_validation.py
 │   └── logging_utils.py             # Centralized logging utility
 ├── run_pipeline.sh                   # Automated pipeline runner
-├── scripts_output/                   # Created automatically
-│   ├── particle_selections.json     # Particle selections (single file)
-│   ├── log.txt                      # Centralized log file with timestamps
-│   ├── particles_tracking/          # Per-particle drift CSVs
-│   ├── particle_drift/              # Aggregated drift CSVs
-│   └── validation/                  # Validation results
-├── example_data/                     # Example datasets
-│   ├── example_data1/               # First example dataset
-│   ├── example_data2/               # Second example dataset
-│   ├── example_data*_aligned/       # Aligned images (created by script 4)
-│   └── only_for_illustration/       # Documentation images
-└── requirements.txt                  # Python dependencies
+├── requirements.txt                  # Python dependencies
+└── README.md                         # This file
+
+# Output Structure (created next to your image folder)
+/path/to/your/images/
+├── exported/                         # Your original images
+└── script_output/                    # All pipeline outputs (created automatically)
+    ├── particle_selections.json     # Configuration (single image set)
+    ├── log.txt                      # Centralized log file with timestamps
+    ├── particles_tracking/          # Per-particle drift CSVs
+    ├── drift_analysis/              # Averaged drift trajectories
+    ├── aligned/                     # Aligned images
+    └── validation/                  # Validation PNGs
 ```
 
 ## Quick Start
@@ -69,14 +70,14 @@ cd scripts
 # Step 1: Interactive particle selection
 python3 1_select_particles_for_drift.py
 
-# Step 2: Parallel drift analysis
-python3 2_parallel_drift_analysis.py
+# Step 2: Drift analysis
+python3 2_drift_analysis.py
 
-# Step 3: Aggregate particle drift
-python3 3_aggregate_particle_drift.py
+# Step 3: Interactive trajectory selector
+python3 3_interactive_trajectory_selector.py
 
-# Step 4: GPU-accelerated alignment
-python3 4_batch_gpu_alignment.py
+# Step 4: Image alignment
+python3 4_align_images_by_drift.py
 
 # Step 5: Validation
 python3 5_validation.py
@@ -86,42 +87,53 @@ python3 5_validation.py
 
 ### 1. Particle Selection (`1_select_particles_for_drift.py`)
 
-- Interactive GUI for selecting particles to track
-- Validates selections with Gaussian fitting
-- Saves selections to JSON in `scripts_output/`
-- Logs all activity to console and `log.txt` with timestamps
+- **Interactive** napari GUI for selecting particles to track
+- Validates each selection with real-time Gaussian fitting
+- Green markers = successful fits (saved), Red X = failed fits (rejected)
+- Single image set workflow (simplified)
+- Saves selections to JSON in `script_output/` (next to image folder)
+- Logs all activity to console and `log.txt`
 
-### 2. Parallel Drift Analysis (`2_parallel_drift_analysis.py`)
+### 2. Drift Analysis (`2_drift_analysis.py`)
 
-- Processes multiple image sets in parallel
-- Performs Gaussian fitting on all images
-- Tracks particle positions and calculates drift
-- Outputs to `scripts_output/particles_tracking/`
-- Logs progress and statistics to console and `log.txt`
+- Processes single image set sequentially with **nested progress bars**
+  - Outer progress bar: Images
+  - Inner progress bar: Particles per image
+- Performs Gaussian fitting on all images to track particles
+- Calculates drift (displacement from first frame) for each particle
+- Outputs per-particle tracking CSV to `script_output/particles_tracking/`
+- Updates JSON with CSV file paths
+- Logs progress and statistics
 
-### 3. Aggregate Particle Drift (`3_aggregate_particle_drift.py`)
+### 3. Interactive Trajectory Selector (`3_interactive_trajectory_selector.py`)
 
-- Aggregates per-particle drift to per-image drift
-- Calculates rotation using Procrustes alignment
-- Generates drift plots
-- Outputs to `scripts_output/particle_drift/`
-- Logs aggregation results to console and `log.txt`
+- **Interactive** GUI to visualize and select particles for drift correction
+- Shows absolute trajectories and drift preview
+- Select which particles to use for averaging
+- Generates averaged drift trajectory and individual trajectory PNGs
+- Outputs to `script_output/drift_analysis/`
+- Updates JSON with selected particle IDs and drift file paths
 
-### 4. Batch GPU Alignment (`4_batch_gpu_alignment.py`)
+### 4. Image Alignment (`4_align_images_by_drift.py`)
 
-- GPU-accelerated image alignment
-- Applies drift and rotation corrections
-- Creates aligned image folders (sibling to input folders)
-- Outputs to `{original_folder}_aligned/`
-- Logs GPU operations and progress to console and `log.txt`
+- Applies drift correction using selected particles
+- CPU-based alignment with scipy's ndimage.shift
+- Reads configuration automatically from JSON
+- Creates aligned images in `script_output/aligned/`
+- Saves alignment log with applied shifts
+- Updates JSON with aligned folder path
 
 ### 5. Validation (`5_validation.py`)
 
-- Re-analyzes aligned images
-- Measures residual drift (should be near zero)
-- Generates comparison plots
-- Outputs to `scripts_output/validation/`
-- Logs validation metrics to console and `log.txt`
+- **Re-fits Gaussians on aligned images** to validate drift correction effectiveness
+- Processes ONLY selected particles from Step 3 (with progress bars like Step 2)
+- Exports validation tracking CSV (same format as Step 2)
+- Generates before/after comparison plots for each particle
+- Creates summary plot with drift reduction statistics and table
+- Calculates quantitative drift reduction percentages
+- **Proves alignment worked** by demonstrating reduced drift in aligned images
+- Outputs to `script_output/validation/`
+- Updates JSON with validation folder and CSV paths
 
 ## Requirements
 
@@ -138,114 +150,110 @@ Or install manually:
 ```bash
 pip install napari[all] tifffile numpy scipy scikit-image magicgui
 pip install pandas tqdm matplotlib
-pip install torch torchvision pillow
 ```
 
 ### System Requirements
 
 - Python 3.8 or higher
-- CUDA-capable GPU (optional, for faster alignment in script 4)
 - 8+ GB RAM recommended
+- No GPU required (CPU-based processing)
 
-## Path Handling
+## How It Works
 
-All scripts automatically:
+### Automatic Configuration
 
-- Look for JSON files in `../scripts_output/` (relative to scripts folder)
-- Create output directories in `../scripts_output/` hierarchy
-- Handle paths correctly when run from `scripts/` directory
+All scripts automatically discover and load configuration:
 
-## Logging System
+- **Script 1** creates `script_output/` folder next to your image folder and outputs JSON path
+- **When using pipeline runner**: JSON path passed automatically from Script 1 to Scripts 2-5
+- **When running individually**: Scripts 2-5 auto-discover the JSON file location
+- No manual path configuration required from user
+- All outputs saved in `script_output/` structure
 
-All scripts use a centralized logging system (`logging_utils.py`):
+### JSON Evolution
 
-- Logs to **both console and `log.txt`** in `scripts_output/`
-- Includes timestamps for all operations
-- Persistent across pipeline runs (appends to existing log)
-- Useful for debugging and tracking pipeline progress
-- Worker processes safely write to shared log file
+The `particle_selections.json` file evolves through the pipeline:
 
-## JSON File Management
-
-The pipeline uses a single JSON file (`particle_selections.json`) that is updated at each step:
-
-- Created by script 1 with particle selections
-- Updated by script 2 with CSV file paths
-- Updated by script 3 with drift CSV paths
-- Updated by script 4 with aligned folder paths
-- Updated by script 5 with validation results
+1. **After Script 1**: Contains selected particles and image folder path
+2. **After Script 2**: Adds CSV file paths for particle tracking
+3. **After Script 3**: Adds selected particle IDs for drift correction + drift CSV paths
+4. **After Script 4**: Adds aligned images folder path + alignment log paths
+5. **After Script 5**: Adds validation folder path + validation CSV paths
 
 ## Output Files
 
-### scripts_output/
+### script_output/ (created next to your images)
 
-- `particle_selections.json` - Main configuration file (single file, updated at each step)
-- `log.txt` - Centralized log file with timestamps from all pipeline steps
-- `particles_tracking/{folder}_{id}.csv` - Per-particle drift data
-- `particle_drift/drift_{folder}_{id}.csv` - Aggregated drift data
-- `particle_drift/drift_plot_{folder}.png` - Drift visualization
-- `validation/{folder}_{id}.csv` - Validation particle data
-- `validation/drift_{folder}_{id}.csv` - Validation drift data
-- `validation/validation_plot_{folder}.png` - Before/after comparison
-
-### Aligned Images
-
-- Created as sibling folders: `{original_folder}_aligned/`
-- Contains aligned TIF files with `_aligned` suffix
+- `particle_selections.json` - Central configuration (single image set)
+- `log.txt` - Centralized log with timestamps from all steps
+- `particles_tracking/{folder}_{id}.csv` - Per-particle tracking data
+- `drift_analysis/averaged_drift_trajectory.csv` - Averaged drift data
+- `drift_analysis/averaged_drift_trajectory.png` - Drift visualization
+- `drift_analysis/absolute_trajectories.png` - Absolute position plots
+- `aligned/{image_files}.tif` - Aligned images
+- `aligned/alignment_log.csv` - Applied shifts per frame
+- `validation/aligned_particles_tracking.csv` - Re-fitted positions on aligned images
+- `validation/particle_{id}_comparison.png` - Before/after comparison plots
+- `validation/drift_reduction_summary.png` - Overall validation with statistics table
 
 ## Usage Notes
 
-1. **Always run from the project root directory** (`image_alignement/`)
-2. The `scripts_output/` folder is created automatically
-3. Scripts auto-discover the JSON file (if only one exists)
-4. All scripts use `python3` command
-5. GPU alignment will use CUDA if available, otherwise CPU
-6. **All pipeline activity is logged to `scripts_output/log.txt`** with timestamps
-7. The log file persists across runs - check it for debugging or tracking progress
+1. **Run from project root** or use `./run_pipeline.sh`
+2. **Single image set workflow** - process one folder at a time
+3. **Interactive steps**: Scripts 1 and 3 require user interaction
+4. **Automatic steps**: Scripts 2, 4, and 5 run automatically
+5. **All activity logged** to `script_output/log.txt` with timestamps
+6. **No manual path passing** - scripts auto-discover everything from JSON
 
-## Advanced Options
+### Running with Pipeline vs Standalone
 
-### Script 4 Options:
+- **Using `./run_pipeline.sh`**: JSON path automatically passed between scripts via shell
+- **Running scripts individually**: Scripts auto-discover JSON file location
+- Both methods work identically from user perspective
+- Pipeline runner recommended for full workflow execution
 
-```bash
-python3 4_batch_gpu_alignment.py --batch_size 16 --interpolation bicubic
-```
+## Logging System
 
-Options:
+All scripts use centralized logging (`logging_utils.py`):
 
-- `--batch_size`: GPU batch size (default: 8)
-- `--interpolation`: bilinear or bicubic (default: bilinear)
-- `--device`: cuda, cpu, or auto (default: auto)
-- `--suffix`: output folder suffix (default: _aligned)
+- Writes to **both console and `log.txt`**
+- Includes timestamps for all operations
+- Log file persists across runs (appends)
+- Useful for debugging and tracking progress
+- Located in `script_output/` next to your images
 
 ## Troubleshooting
 
-**"Error: 'scripts_output' folder not found!"**
+**"Error: Cannot find particle_selections.json!"**
 
-- The folder is created automatically by script 1
-- Make sure you run script 1 first
+- Run script 1 first to create the configuration
+- Make sure you selected a valid image folder
 
-**"Error: No JSON files found"**
+**"No TIF files found"**
 
-- Run script 1 to create the JSON file
-- Or specify JSON path manually: `python3 script.py path/to/file.json`
+- Check that your folder contains .tif or .tiff files
+- Ensure file permissions allow reading
 
-**"Error: Multiple JSON files found"**
+**"No selected particles in JSON"**
 
-- Specify which file to use: `python3 script.py scripts_output/file.json`
+- You need to run script 3 to select particles for drift correction
+- Script 3 must complete successfully (save, not cancel)
 
-**Path issues**
+**Running individual scripts**
 
-- Always run scripts from their directory: `cd scripts && python3 script.py`
-- Or use the automated runner: `./run_pipeline.sh`
+- All scripts can run from `scripts/` directory
+- Use: `cd scripts && python3 script_name.py`
+- Or use the pipeline runner: `./run_pipeline.sh`
 
 ## Expected Results
 
-After successful validation:
+After successful completion:
 
-- Residual X/Y drift: < 0.1 pixels (typically)
-- Residual rotation: < 0.01 degrees (typically)
-- High success rate for Gaussian fits: > 90%
+- **Script 1**: JSON created with selected particles
+- **Script 2**: CSV with particle positions over time (with progress bars)
+- **Script 3**: Selected particles for drift, averaged trajectory
+- **Script 4**: Aligned images in `script_output/aligned/`
+- **Script 5**: Validation CSV + comparison plots proving drift reduction (quantitative)
 
 ## License
 
