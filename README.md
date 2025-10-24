@@ -236,7 +236,7 @@ Scripts 2 and 4 use **multiprocessing** to significantly speed up processing:
 - **Why 1/4?**: Balances parallelization with HDD read contention
 
 #### Script 4: Image Alignment (Read + Write)
-- **Worker count**: Fixed at 4 workers (regardless of CPU count)
+- **Worker count**: Fixed at 2 workers (regardless of CPU count)
 - **Operations**: Reads original images AND writes aligned images to disk
 - **Bottleneck**: HDD write queue saturation
 - **Why fixed 4?**: Conservative setting prevents disk thrashing with simultaneous read+write operations
