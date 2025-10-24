@@ -128,8 +128,15 @@ python3 5_validation.py
 
 ### 5. Validation (`5_validation.py`)
 
+- **Parallelized** processing for improved performance (same as Script 2)
+- Uses multiprocessing to perform Gaussian fitting across multiple CPU cores
+- Processes all (aligned_image, selected_particle) combinations in parallel
+- Worker count: **1/4 of CPU cores** (optimized for HDD read operations)
+- Each worker limited to single-threaded NumPy/SciPy operations
+- Implements image caching (20 images per worker) to minimize disk I/O
+- Real-time progress tracking with tqdm progress bar
 - **Re-fits Gaussians on aligned images** to validate drift correction effectiveness
-- Processes ONLY selected particles from Step 3 (with progress bars like Step 2)
+- Processes ONLY selected particles from Step 3
 - Exports validation tracking CSV (same format as Step 2)
 - Generates before/after comparison plots for each particle
 - Creates summary plot with drift reduction statistics and table

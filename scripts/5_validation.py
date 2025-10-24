@@ -1,12 +1,12 @@
 """
-Validation Script - Re-fit Gaussians on Aligned Images
+Validation Script - Re-fit Gaussians on Aligned Images (Parallelized)
 Performs Gaussian fitting on aligned images to validate drift correction effectiveness.
 
 Requirements:
 pip install tifffile numpy scipy pandas tqdm matplotlib
 
 Usage:
-python 5_validation.py <json_path>
+python3 5_validation.py <json_path>
 
 The script loads all information from the JSON file and validates alignment by:
 1. Re-fitting Gaussians on ONLY selected particles in aligned images
@@ -18,6 +18,14 @@ Output:
 - PNGs: Comparison plots for each particle
 - Summary: Drift reduction statistics
 """
+
+# Limit threading in numerical libraries to prevent CPU overload
+# Each worker process should use only 1 thread
+import os
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
 import numpy as np
 import tifffile
@@ -34,6 +42,8 @@ from typing import Optional, Tuple, Dict, Any, List
 import sys
 import time
 from tqdm import tqdm
+import multiprocessing as mp
+from multiprocessing import Pool
 from logging_utils import setup_logger, log_exception
 
 # Logger will be set up after finding JSON file
@@ -141,6 +151,111 @@ def fit_gaussian_to_region(region: np.ndarray,
 
     except Exception as e:
         return None
+
+
+# Global cache for loaded images (used by worker processes)
+_image_cache = {}
+_cache_max_size = 20  # Keep last 20 images in memory per worker (optimized for HDD)
+
+def _load_image_cached(image_path: str) -> np.ndarray:
+    """
+    Load image with simple LRU-style caching.
+    Each worker process maintains its own cache.
+    """
+    global _image_cache
+    
+    if image_path in _image_cache:
+        return _image_cache[image_path]
+    
+    # Load new image
+    image = tifffile.imread(image_path)
+    
+    # Simple cache management: if too many cached, remove oldest
+    if len(_image_cache) >= _cache_max_size:
+        # Remove first (oldest) item
+        oldest_key = next(iter(_image_cache))
+        del _image_cache[oldest_key]
+    
+    _image_cache[image_path] = image
+    return image
+
+
+def process_single_fit(work_item: Tuple[str, int, str, Dict, int]) -> Dict[str, Any]:
+    """
+    Worker function: process a single Gaussian fit.
+    
+    Args:
+        work_item: (image_path, image_index, filename, particle, particle_index)
+    
+    Returns:
+        Dictionary with fit results
+    """
+    image_path, image_index, filename, particle, particle_idx = work_item
+    
+    try:
+        # Load image (with caching)
+        image = _load_image_cached(image_path)
+        
+        if image.ndim != 2:
+            return {
+                'filename': filename,
+                'particle_id': particle['particle_id'],
+                'image_index': image_index,
+                'bbox': tuple(particle['bbox']),
+                'success': False,
+                'error': 'Not grayscale'
+            }
+        
+        bbox = tuple(particle['bbox'])
+        particle_id = particle['particle_id']
+        
+        x0, y0, x1, y1 = bbox
+        
+        # Ensure coordinates are within bounds
+        x0 = max(0, int(x0))
+        y0 = max(0, int(y0))
+        x1 = min(image.shape[1], int(x1))
+        y1 = min(image.shape[0], int(y1))
+        
+        if x1 <= x0 or y1 <= y0:
+            return {
+                'filename': filename,
+                'particle_id': particle_id,
+                'image_index': image_index,
+                'bbox': bbox,
+                'success': False,
+                'error': 'Invalid bbox'
+            }
+        
+        # Extract region
+        region = image[y0:y1, x0:x1].copy()
+        
+        # Fit Gaussian
+        fit_result = fit_gaussian_to_region(region, (x0, y0, x1, y1))
+        
+        # Build result record
+        result = {
+            'filename': filename,
+            'particle_id': particle_id,
+            'image_index': image_index,
+            'bbox': bbox,
+            'success': fit_result is not None and fit_result.get('success', False)
+        }
+        
+        if result['success']:
+            result.update(fit_result)
+        
+        return result
+        
+    except Exception as e:
+        return {
+            'filename': filename,
+            'particle_id': particle['particle_id'],
+            'image_index': image_index,
+            'bbox': tuple(particle['bbox']),
+            'success': False,
+            'error': str(e)
+        }
 
 
 def export_validation_csv(all_results: List[Dict], output_file: Path,
@@ -451,7 +566,7 @@ def main():
     log_dir = json_file.parent
     logger = setup_logger('Step5_Validation', log_dir=str(log_dir))
 
-    logger.info("=== VALIDATION: Re-fit Gaussians on Aligned Images ===\n")
+    logger.info("=== VALIDATION: Re-fit Gaussians on Aligned Images (Parallelized) ===\n")
     logger.info(f"Loading configuration from: {json_file}")
 
     # Load JSON
@@ -522,6 +637,11 @@ def main():
         sys.exit(1)
 
     logger.info(f"  Total aligned images: {len(aligned_files)}")
+    
+    # Determine number of workers (use 1/4 of CPU cores for HDD read operations)
+    total_cores = mp.cpu_count()
+    num_workers = max(1, total_cores // 4)
+    logger.info(f"\nUsing {num_workers} workers (1/4 of {total_cores} CPU cores) - optimized for HDD")
 
     # Create output directory
     output_dir = json_file.parent / 'validation'
@@ -529,97 +649,84 @@ def main():
     logger.info(f"\nOutput directory: {output_dir}")
 
     logger.info("\n" + "="*60)
-    logger.info("Starting Gaussian fitting on aligned images...")
+    logger.info("Starting parallel Gaussian fitting on aligned images...")
     logger.info("="*60 + "\n")
 
-    # Process aligned images with progress bars (matching Step 2 style)
+    # Create all work items (image, particle combinations)
+    work_items = []
+    for img_idx, tif_file in enumerate(aligned_files):
+        for particle_idx, particle in enumerate(selected_particles_info):
+            work_items.append((
+                str(tif_file),           # image_path
+                img_idx,                  # image_index
+                tif_file.name,           # filename
+                particle,                 # particle dict
+                particle_idx              # particle_index
+            ))
+    
+    total_work_items = len(work_items)
+    logger.info(f"Total Gaussian fits to perform: {total_work_items}")
+    logger.info(f"  ({len(aligned_files)} images × {len(selected_particles_info)} particles)\n")
+
+    # Process in parallel with progress bar
     start_time = time.time()
-
+    
     all_results = []
-    first_frame_positions = {}
-
-    # Outer progress bar for images
-    for img_idx, tif_file in enumerate(tqdm(aligned_files, desc="Processing aligned images", unit="img")):
-        try:
-            # Load aligned image
-            image = tifffile.imread(str(tif_file))
-            if image.ndim != 2:
-                logger.warning(f"Skipping {tif_file.name} - not grayscale")
-                continue
-
-            # Inner progress bar for particles in this image
-            for particle in tqdm(selected_particles_info,
-                               desc=f"  Image {img_idx+1}/{len(aligned_files)}",
-                               unit="particle", leave=False):
-                bbox = tuple(particle['bbox'])
-                particle_id = particle['particle_id']
-
-                x0, y0, x1, y1 = bbox
-
-                # Ensure coordinates are within bounds
-                x0 = max(0, int(x0))
-                y0 = max(0, int(y0))
-                x1 = min(image.shape[1], int(x1))
-                y1 = min(image.shape[0], int(y1))
-
-                if x1 <= x0 or y1 <= y0:
-                    continue
-
-                # Extract region
-                region = image[y0:y1, x0:x1].copy()
-
-                # Fit Gaussian
-                fit_result = fit_gaussian_to_region(region, (x0, y0, x1, y1))
-
-                # Build result record
-                result = {
-                    'filename': tif_file.name,
-                    'particle_id': particle_id,
-                    'image_index': img_idx,
-                    'bbox': bbox,
-                    'success': fit_result is not None and fit_result.get('success', False)
-                }
-
-                if result['success']:
-                    result.update(fit_result)
-
-                    # Track first frame position
-                    if img_idx == 0:
-                        first_frame_positions[particle_id] = {
-                            'center_x': fit_result['center_x'],
-                            'center_y': fit_result['center_y']
-                        }
-
-                    # Calculate drift from first aligned frame
-                    if particle_id in first_frame_positions:
-                        dx = fit_result['center_x'] - first_frame_positions[particle_id]['center_x']
-                        dy = fit_result['center_y'] - first_frame_positions[particle_id]['center_y']
-                        drift_magnitude = np.sqrt(dx**2 + dy**2)
-
-                        result['drift_x'] = dx
-                        result['drift_y'] = dy
-                        result['drift_magnitude'] = drift_magnitude
-                    else:
-                        result['drift_x'] = None
-                        result['drift_y'] = None
-                        result['drift_magnitude'] = None
-
+    
+    with Pool(processes=num_workers) as pool:
+        # Use imap_unordered for streaming results with progress tracking
+        with tqdm(total=total_work_items, desc="Fitting Gaussians", unit="fit", ncols=100) as pbar:
+            for result in pool.imap_unordered(process_single_fit, work_items, chunksize=10):
                 all_results.append(result)
-
-        except Exception as e:
-            logger.error(f"Error processing {tif_file.name}: {e}")
-            log_exception(logger, e, f"Image processing error: {tif_file.name}")
-            continue
-
+                pbar.update(1)
+    
     end_time = time.time()
+
+    logger.info("\n" + "="*60)
+    logger.info("Parallel processing complete!")
+    logger.info("="*60 + "\n")
+
+    # Calculate first frame positions and drift
+    logger.info("Calculating drift from first aligned frame...")
+    first_frame_positions = {}
+    
+    # Sort results by image_index and particle_id for organized processing
+    all_results.sort(key=lambda x: (x['image_index'], x['particle_id']))
+    
+    # First pass: collect first frame positions
+    for result in all_results:
+        if result['image_index'] == 0 and result['success']:
+            particle_id = result['particle_id']
+            first_frame_positions[particle_id] = {
+                'center_x': result['center_x'],
+                'center_y': result['center_y']
+            }
+    
+    # Second pass: calculate drift for all frames
+    for result in all_results:
+        if result['success']:
+            particle_id = result['particle_id']
+            if particle_id in first_frame_positions:
+                dx = result['center_x'] - first_frame_positions[particle_id]['center_x']
+                dy = result['center_y'] - first_frame_positions[particle_id]['center_y']
+                drift_magnitude = np.sqrt(dx**2 + dy**2)
+                
+                result['drift_x'] = dx
+                result['drift_y'] = dy
+                result['drift_magnitude'] = drift_magnitude
+            else:
+                result['drift_x'] = None
+                result['drift_y'] = None
+                result['drift_magnitude'] = None
+        else:
+            result['drift_x'] = None
+            result['drift_y'] = None
+            result['drift_magnitude'] = None
 
     # Calculate statistics
     successful_fits = sum(1 for r in all_results if r['success'])
     success_rate = (successful_fits / len(all_results) * 100) if all_results else 0
 
-    logger.info("\n" + "="*60)
-    logger.info("Gaussian fitting complete!")
-    logger.info("="*60 + "\n")
     logger.info(f"Processing time: {end_time - start_time:.2f} seconds")
     logger.info(f"Total fits attempted: {len(all_results)}")
     logger.info(f"Successful fits: {successful_fits}")
