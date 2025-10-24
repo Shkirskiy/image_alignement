@@ -367,10 +367,10 @@ def main():
         logger.error(f"CSV file not found: {csv_file}")
         sys.exit(1)
 
-    # Determine number of workers (fixed at 4 for HDD with read+write operations)
+    # Determine number of workers (fixed at 2 for HDD with read+write operations)
     # This conservative setting prevents HDD write queue saturation
     total_cores = mp.cpu_count()
-    num_workers = 4
+    num_workers = 2
     logger.info(f"\nUsing {num_workers} workers (fixed, out of {total_cores} CPU cores) - optimized for HDD with read+write")
 
     # Load drift data
