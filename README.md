@@ -96,10 +96,13 @@ python3 5_validation.py
 
 ### 2. Drift Analysis (`2_drift_analysis.py`)
 
-- Processes single image set sequentially with **nested progress bars**
-  - Outer progress bar: Images
-  - Inner progress bar: Particles per image
-- Performs Gaussian fitting on all images to track particles
+- **Parallelized** processing for improved performance
+- Uses multiprocessing to perform Gaussian fitting across multiple CPU cores
+- Processes all (image, particle) combinations in parallel
+- Worker count: **1/4 of CPU cores** (optimized for HDD read operations)
+- Each worker limited to single-threaded NumPy/SciPy operations
+- Implements image caching (20 images per worker) to minimize disk I/O
+- Real-time progress tracking with tqdm progress bar
 - Calculates drift (displacement from first frame) for each particle
 - Outputs per-particle tracking CSV to `script_output/particles_tracking/`
 - Updates JSON with CSV file paths
@@ -211,6 +214,120 @@ The `particle_selections.json` file evolves through the pipeline:
 - **Running scripts individually**: Scripts auto-discover JSON file location
 - Both methods work identically from user perspective
 - Pipeline runner recommended for full workflow execution
+
+## Performance & Optimization
+
+### Parallelization Strategy
+
+Scripts 2 and 4 use **multiprocessing** to significantly speed up processing:
+
+#### Script 2: Drift Analysis (Gaussian Fitting)
+- **Worker count**: 1/4 of CPU cores (e.g., 12 cores → 3 workers)
+- **Operations**: Only reads images from disk
+- **Bottleneck**: CPU-intensive Gaussian fitting
+- **Image caching**: 20 images per worker to minimize repeated disk reads
+- **Why 1/4?**: Balances parallelization with HDD read contention
+
+#### Script 4: Image Alignment (Read + Write)
+- **Worker count**: Fixed at 4 workers (regardless of CPU count)
+- **Operations**: Reads original images AND writes aligned images to disk
+- **Bottleneck**: HDD write queue saturation
+- **Why fixed 4?**: Conservative setting prevents disk thrashing with simultaneous read+write operations
+
+### Thread Limiting
+
+Both parallelized scripts limit NumPy/SciPy to **single-threaded operations** per worker:
+
+```python
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+```
+
+**Why?** Without this, each worker spawns multiple threads internally, leading to:
+- Total threads = num_workers × threads_per_worker
+- Example: 6 workers × 2 threads = 12 threads → all CPUs loaded
+- Result: System becomes unresponsive for other tasks
+
+**With thread limiting**: 6 workers × 1 thread = 6 threads → half of CPUs remain free
+
+### HDD vs SSD Considerations
+
+**Current settings optimized for HDD:**
+- HDDs struggle with parallel I/O due to physical read/write head movement
+- Multiple workers reading/writing simultaneously cause disk thrashing
+- Symptoms: slowdowns after initial fast period, unusual disk noises
+
+**If you have an SSD:**
+You can increase worker counts for better performance:
+
+**Script 2** (`scripts/2_drift_analysis.py`):
+```python
+# Change from:
+num_workers = max(1, total_cores // 4)
+
+# To (for SSD):
+num_workers = max(1, total_cores // 2)  # Use half of cores
+```
+
+**Script 4** (`scripts/4_align_images_by_drift.py`):
+```python
+# Change from:
+num_workers = 4
+
+# To (for SSD):
+num_workers = 8  # Or more, experiment to find optimal
+```
+
+### Hardware-Specific Adjustments
+
+**The default settings (1/4 cores for Script 2, 4 workers for Script 4) work well for:**
+- Standard HDDs (5400-7200 RPM)
+- Systems with 8-32 CPU cores
+- Mixed workload scenarios (running other tasks simultaneously)
+
+**You may need to adjust if you have:**
+
+1. **Very high core count (>64 cores)**:
+   - Script 2's "1/4 cores" may still overwhelm HDD
+   - Consider using fixed worker count instead of fractional
+
+2. **NVMe SSD or RAID array**:
+   - Much higher I/O capacity
+   - Can safely increase worker counts significantly
+   - Experiment with 2x-4x the default values
+
+3. **Low RAM (<8 GB)**:
+   - Reduce image cache size in Script 2:
+   ```python
+   _cache_max_size = 10  # Instead of 20
+   ```
+
+4. **Need maximum single-task performance**:
+   - Script 2: Increase to 1/2 or 3/4 of cores
+   - Script 4: Increase to 6-8 workers
+   - Remove thread limits to use multi-threaded NumPy/SciPy
+
+### Performance Monitoring
+
+**Signs of optimal performance:**
+- Consistent processing speed throughout
+- CPU usage at expected level (e.g., 25% for Script 2)
+- No disk thrashing sounds
+- System remains responsive
+
+**Signs of over-parallelization:**
+- Fast start, then dramatic slowdown
+- Disk making excessive seeking noises
+- CPU usage drops despite work remaining
+- System becomes unresponsive
+
+**Recommended approach:**
+1. Start with default settings
+2. Monitor system performance during first run
+3. Adjust worker counts if needed
+4. Test and iterate to find optimal settings for your hardware
 
 ## Logging System
 

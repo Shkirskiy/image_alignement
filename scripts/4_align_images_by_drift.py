@@ -1,5 +1,5 @@
 """
-Align Images by Particle Drift
+Align Images by Particle Drift (Parallelized)
 Aligns a series of images based on the average drift of selected particles.
 Uses particles selected in script 3 to calculate average displacement and applies inverse shift.
 
@@ -7,7 +7,7 @@ Requirements:
 pip install pandas numpy scipy tifffile tqdm
 
 Usage:
-python 4_align_images_by_drift.py
+python3 4_align_images_by_drift.py
 
 The script automatically finds all required information from the JSON file.
 
@@ -22,6 +22,14 @@ Output:
 - JSON updated with alignment folder path
 """
 
+# Limit threading in numerical libraries to prevent CPU overload
+# Each worker process should use only 1 thread
+import os
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+
 import pandas as pd
 import numpy as np
 import tifffile
@@ -31,6 +39,9 @@ import json
 from tqdm import tqdm
 import sys
 from datetime import datetime
+from typing import Dict, Any, Tuple, Optional
+import multiprocessing as mp
+from multiprocessing import Pool
 
 def load_drift_data(csv_path: Path, particle_ids: list) -> pd.DataFrame:
     """
@@ -123,16 +134,95 @@ def align_image(image: np.ndarray, shift_x: float, shift_y: float) -> np.ndarray
 
     return aligned
 
-def align_images(source_folder: Path, drift_summary: pd.DataFrame, output_folder: Path,
-                 skip_existing: bool = False) -> pd.DataFrame:
+
+def process_single_image(work_item: Tuple[Path, Path, Optional[Dict[str, Any]]]) -> Dict[str, Any]:
     """
-    Align all images based on drift data.
+    Worker function: process a single image alignment.
+    
+    Args:
+        work_item: (source_path, output_path, drift_data_or_None)
+            - source_path: Path to source TIF file
+            - output_path: Path to save aligned TIF file
+            - drift_data: Dict with avg_drift_x, avg_drift_y, num_particles (or None if no drift data)
+    
+    Returns:
+        Dictionary with alignment results
+    """
+    source_path, output_path, drift_data = work_item
+    filename = source_path.name
+    
+    try:
+        # Load image
+        image = tifffile.imread(str(source_path))
+        
+        # If no drift data, just save original image
+        if drift_data is None:
+            tifffile.imwrite(str(output_path), image)
+            return {
+                'filename': filename,
+                'avg_drift_x': 0.0,
+                'avg_drift_y': 0.0,
+                'num_particles': 0,
+                'aligned': False,
+                'status': 'no_drift_data'
+            }
+        
+        # Check if image is 2D grayscale
+        if image.ndim != 2:
+            # Not 2D, just save original
+            tifffile.imwrite(str(output_path), image)
+            return {
+                'filename': filename,
+                'avg_drift_x': drift_data['avg_drift_x'],
+                'avg_drift_y': drift_data['avg_drift_y'],
+                'num_particles': drift_data['num_particles'],
+                'aligned': False,
+                'status': 'not_2d'
+            }
+        
+        # Get shift values
+        shift_x = drift_data['avg_drift_x']
+        shift_y = drift_data['avg_drift_y']
+        
+        # Align image
+        aligned_image = align_image(image, shift_x, shift_y)
+        
+        # Ensure output has same dtype as input
+        aligned_image = aligned_image.astype(image.dtype)
+        
+        # Save aligned image
+        tifffile.imwrite(str(output_path), aligned_image)
+        
+        return {
+            'filename': filename,
+            'avg_drift_x': shift_x,
+            'avg_drift_y': shift_y,
+            'num_particles': drift_data['num_particles'],
+            'aligned': True,
+            'status': 'success'
+        }
+        
+    except Exception as e:
+        return {
+            'filename': filename,
+            'avg_drift_x': drift_data['avg_drift_x'] if drift_data else 0.0,
+            'avg_drift_y': drift_data['avg_drift_y'] if drift_data else 0.0,
+            'num_particles': drift_data['num_particles'] if drift_data else 0,
+            'aligned': False,
+            'status': f'error: {str(e)}'
+        }
+
+
+def align_images_parallel(source_folder: Path, drift_summary: pd.DataFrame, output_folder: Path,
+                         num_workers: int) -> pd.DataFrame:
+    """
+    Align all images based on drift data using parallel processing.
 
     Args:
         source_folder: Folder containing original TIF images
         drift_summary: DataFrame with avg_drift_x, avg_drift_y per frame
         output_folder: Folder to save aligned images
-        skip_existing: If True, skip already processed images
+        num_workers: Number of parallel workers
 
     Returns:
         DataFrame with alignment log
@@ -140,9 +230,10 @@ def align_images(source_folder: Path, drift_summary: pd.DataFrame, output_folder
     # Create output folder
     output_folder.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nAligning images...")
+    print(f"\nAligning images in parallel...")
     print(f"  Source: {source_folder}")
     print(f"  Output: {output_folder}")
+    print(f"  Workers: {num_workers}")
 
     # Get all TIF files from source folder
     tif_patterns = ['*.tif', '*.tiff', '*.TIF', '*.TIFF']
@@ -162,115 +253,37 @@ def align_images(source_folder: Path, drift_summary: pd.DataFrame, output_folder
             'num_particles': row['num_particles']
         }
 
-    # Process images with progress bar
-    alignment_log = []
-    skipped_count = 0
-    no_drift_count = 0
-    aligned_count = 0
+    # Create work items for all images
+    work_items = []
+    for tif_file in tif_files:
+        filename = tif_file.name
+        output_file = output_folder / filename
+        drift_data = drift_dict.get(filename, None)
+        
+        work_items.append((tif_file, output_file, drift_data))
 
-    with tqdm(total=len(tif_files), desc="Aligning images", unit="img", ncols=100) as pbar:
-        for tif_file in tif_files:
-            filename = tif_file.name
-            output_file = output_folder / filename
-
-            # Skip if already exists and skip_existing is True
-            if skip_existing and output_file.exists():
-                skipped_count += 1
+    # Process in parallel with progress bar
+    alignment_results = []
+    
+    with Pool(processes=num_workers) as pool:
+        with tqdm(total=len(work_items), desc="Aligning images", unit="img", ncols=100) as pbar:
+            for result in pool.imap_unordered(process_single_image, work_items, chunksize=1):
+                alignment_results.append(result)
                 pbar.update(1)
-                continue
-
-            # Check if we have drift data for this file
-            if filename not in drift_dict:
-                # No drift data - just copy the original image
-                try:
-                    image = tifffile.imread(str(tif_file))
-                    tifffile.imwrite(str(output_file), image)
-                    no_drift_count += 1
-
-                    alignment_log.append({
-                        'filename': filename,
-                        'avg_drift_x': 0.0,
-                        'avg_drift_y': 0.0,
-                        'num_particles': 0,
-                        'aligned': False,
-                        'status': 'no_drift_data'
-                    })
-                except Exception as e:
-                    print(f"\n  Error copying {filename}: {e}")
-                    alignment_log.append({
-                        'filename': filename,
-                        'avg_drift_x': 0.0,
-                        'avg_drift_y': 0.0,
-                        'num_particles': 0,
-                        'aligned': False,
-                        'status': f'error: {e}'
-                    })
-
-                pbar.update(1)
-                continue
-
-            # Get drift data
-            drift_data = drift_dict[filename]
-            shift_x = drift_data['avg_drift_x']
-            shift_y = drift_data['avg_drift_y']
-
-            try:
-                # Load image
-                image = tifffile.imread(str(tif_file))
-
-                # Check if image is 2D grayscale
-                if image.ndim != 2:
-                    print(f"\n  Warning: {filename} is not 2D grayscale, skipping alignment")
-                    tifffile.imwrite(str(output_file), image)
-                    alignment_log.append({
-                        'filename': filename,
-                        'avg_drift_x': shift_x,
-                        'avg_drift_y': shift_y,
-                        'num_particles': drift_data['num_particles'],
-                        'aligned': False,
-                        'status': 'not_2d'
-                    })
-                    pbar.update(1)
-                    continue
-
-                # Align image
-                aligned_image = align_image(image, shift_x, shift_y)
-
-                # Ensure output has same dtype as input
-                aligned_image = aligned_image.astype(image.dtype)
-
-                # Save aligned image
-                tifffile.imwrite(str(output_file), aligned_image)
-
-                aligned_count += 1
-
-                alignment_log.append({
-                    'filename': filename,
-                    'avg_drift_x': shift_x,
-                    'avg_drift_y': shift_y,
-                    'num_particles': drift_data['num_particles'],
-                    'aligned': True,
-                    'status': 'success'
-                })
-
-            except Exception as e:
-                print(f"\n  Error processing {filename}: {e}")
-                alignment_log.append({
-                    'filename': filename,
-                    'avg_drift_x': shift_x,
-                    'avg_drift_y': shift_y,
-                    'num_particles': drift_data['num_particles'],
-                    'aligned': False,
-                    'status': f'error: {e}'
-                })
-
-            pbar.update(1)
-
-    print(f"\n  Aligned: {aligned_count} images")
+    
+    # Create DataFrame from results
+    alignment_log = pd.DataFrame(alignment_results)
+    
+    # Print summary
+    aligned_count = alignment_log['aligned'].sum()
+    no_drift_count = (alignment_log['status'] == 'no_drift_data').sum()
+    
+    print(f"\n  Successfully aligned: {aligned_count} images")
     print(f"  No drift data (copied): {no_drift_count} images")
-    print(f"  Skipped (already exists): {skipped_count} images")
+    print(f"  Failed/Skipped: {len(alignment_log) - aligned_count - no_drift_count} images")
 
-    return pd.DataFrame(alignment_log)
+    return alignment_log
+
 
 def main():
     """Main function to align images by drift."""
@@ -308,7 +321,7 @@ def main():
     log_dir = json_file.parent
     logger = setup_logger('Step4_ImageAlignment', log_dir=str(log_dir))
     
-    logger.info("=== Image Alignment by Particle Drift ===\n")
+    logger.info("=== Image Alignment by Particle Drift (Parallelized) ===\n")
     logger.info(f"Loading configuration from: {json_file}")
 
     # Load JSON
@@ -354,6 +367,12 @@ def main():
         logger.error(f"CSV file not found: {csv_file}")
         sys.exit(1)
 
+    # Determine number of workers (fixed at 4 for HDD with read+write operations)
+    # This conservative setting prevents HDD write queue saturation
+    total_cores = mp.cpu_count()
+    num_workers = 4
+    logger.info(f"\nUsing {num_workers} workers (fixed, out of {total_cores} CPU cores) - optimized for HDD with read+write")
+
     # Load drift data
     drift_data = load_drift_data(csv_file, selected_particles)
 
@@ -367,8 +386,8 @@ def main():
     # Define output folder - use script_output/aligned
     output_folder = json_file.parent / 'aligned'
 
-    # Align images
-    alignment_log = align_images(source_folder, drift_summary, output_folder, skip_existing=False)
+    # Align images in parallel
+    alignment_log = align_images_parallel(source_folder, drift_summary, output_folder, num_workers)
 
     # Save alignment log to CSV
     log_file = output_folder / 'alignment_log.csv'
