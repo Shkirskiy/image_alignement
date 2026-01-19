@@ -11,7 +11,7 @@ This pipeline is designed to align large sequences of 16-bit .tif images from hi
 
 ## Method Overview
 
-The core methodology is based on manual selection of particles, followed by Gaussian fitting to precisely determine and track their locations. The pipeline then applies drift corrections to transpose images based on the measured particle movements. The approach assumes your images have: rigid body motion (translation + rotation, no shearing or scaling), multiple trackable particles that move together, small incremental drift between consecutive frames. The transformation treats the image as a rigid plane that has shifted and rotated slightly, and the alignment corrects this by applying the inverse transformation to bring everything back into a common reference frame.
+The core methodology is based on manual selection of particles, followed by Gaussian fitting to precisely determine and track their locations. The pipeline includes **adaptive bounding box tracking** to ensure particles remain centered in their fitting regions even during significant drift, maximizing fitting success rates. The pipeline then applies drift corrections to transpose images based on the measured particle movements. The approach assumes your images have: rigid body motion (translation + rotation, no shearing or scaling), multiple trackable particles that move together, small incremental drift between consecutive frames. The transformation treats the image as a rigid plane that has shifted and rotated slightly, and the alignment corrects this by applying the inverse transformation to bring everything back into a common reference frame.
 
 The following example shows typical results from `example_data1` before and after alignment (center mark added for visual reference):
 
@@ -98,7 +98,7 @@ python3 5_validation.py
 
 - **Parallelized** processing for improved performance
 - Uses multiprocessing to perform Gaussian fitting across multiple CPU cores
-- Processes all (image, particle) combinations in parallel
+- **Parallelization strategy**: Processes particles in parallel (each particle processes all frames sequentially)
 - Worker count: **1/4 of CPU cores** (optimized for HDD read operations)
 - Each worker limited to single-threaded NumPy/SciPy operations
 - Implements image caching (20 images per worker) to minimize disk I/O
@@ -107,6 +107,35 @@ python3 5_validation.py
 - Outputs per-particle tracking CSV to `script_output/particles_tracking/`
 - Updates JSON with CSV file paths
 - Logs progress and statistics
+
+#### Adaptive Bounding Box Tracking
+
+**NEW FEATURE**: Script 2 now includes intelligent tracking that automatically adjusts the fitting region to follow particle movement:
+
+**How it works:**
+- Starts with the manually selected bounding box from Step 1
+- After each successful Gaussian fit, compares the fitted particle center to the bounding box center
+- Calculates the shift and adjusts the bounding box position for the next frame
+- Box size remains constant, but position follows the particle movement
+- If a fit fails, keeps the same box position (doesn't propagate errors)
+
+**Why this matters:**
+- **Critical for significant drift**: When particles drift >20-30 pixels across the sequence, fixed boxes fail
+- **Prevents fit failures**: Particles stay centered in their fitting regions throughout the sequence
+- **Improves success rates**: Dramatically increases Gaussian fit success for later frames
+- **Automatic**: No user intervention required - works transparently
+
+**Performance trade-off:**
+- **Slower execution**: Sequential frame processing per particle (vs. random order in old version)
+- **Still parallelized**: Multiple particles processed simultaneously
+- **Reliability prioritized**: Fewer failed fits more valuable than raw speed
+- **When it matters most**: Essential for datasets with large cumulative drift
+
+**Technical details:**
+- Bbox adjusts by the difference between fitted center and box center after each successful fit
+- Clipping ensures boxes stay within image boundaries
+- Logs significant shifts (>5 pixels) for debugging
+- Original manually selected boxes stored in JSON remain unchanged
 
 ### 3. Interactive Trajectory Selector (`3_interactive_trajectory_selector.py`)
 
@@ -228,12 +257,16 @@ The `particle_selections.json` file evolves through the pipeline:
 
 Scripts 2 and 4 use **multiprocessing** to significantly speed up processing:
 
-#### Script 2: Drift Analysis (Gaussian Fitting)
+#### Script 2: Drift Analysis (Gaussian Fitting with Adaptive Tracking)
 - **Worker count**: 1/4 of CPU cores (e.g., 12 cores → 3 workers)
+- **Parallelization unit**: Entire particles (not individual fits)
 - **Operations**: Only reads images from disk
 - **Bottleneck**: CPU-intensive Gaussian fitting
 - **Image caching**: 20 images per worker to minimize repeated disk reads
 - **Why 1/4?**: Balances parallelization with HDD read contention
+- **Sequential per particle**: Each particle processed through all frames sequentially for adaptive bbox tracking
+- **Performance impact**: Slightly slower than old random-order processing, but dramatically improves success rates
+- **When it matters**: Essential for datasets with significant drift (>20-30 pixels cumulative)
 
 #### Script 4: Image Alignment (Read + Write)
 - **Worker count**: Fixed at 2 workers (regardless of CPU count)
@@ -374,10 +407,13 @@ All scripts use centralized logging (`logging_utils.py`):
 After successful completion:
 
 - **Script 1**: JSON created with selected particles
-- **Script 2**: CSV with particle positions over time (with progress bars)
+- **Script 2**: CSV with particle positions over time (with progress bars and adaptive tracking for high success rates, especially with significant drift)
 - **Script 3**: Selected particles for drift, averaged trajectory
 - **Script 4**: Aligned images in `script_output/aligned/`
 - **Script 5**: Validation CSV + comparison plots proving drift reduction (quantitative)
+
+**Note on Script 2 Performance:**
+With adaptive bounding box tracking, Script 2 now prioritizes reliability over raw speed. Datasets with significant drift (>20-30 pixels cumulative) will see dramatically improved Gaussian fitting success rates, at the cost of slightly longer processing time compared to the previous version. This trade-off ensures robust particle tracking across the entire image sequence.
 
 ## License
 

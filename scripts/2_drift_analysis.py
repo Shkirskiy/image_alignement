@@ -176,82 +176,154 @@ def _load_image_cached(image_path: str) -> np.ndarray:
     return image
 
 
-def process_single_fit(work_item: Tuple[str, int, str, Dict, int]) -> Dict[str, Any]:
+def clip_bbox_to_bounds(bbox: Tuple[float, float, float, float], 
+                       image_shape: Tuple[int, int]) -> Tuple[int, int, int, int]:
     """
-    Worker function: process a single Gaussian fit.
+    Clip bounding box coordinates to ensure they stay within image bounds.
     
     Args:
-        work_item: (image_path, image_index, filename, particle, particle_index)
+        bbox: (x0, y0, x1, y1) bounding box coordinates
+        image_shape: (height, width) of the image
     
     Returns:
-        Dictionary with fit results
+        Clipped bounding box as (x0, y0, x1, y1)
     """
-    image_path, image_index, filename, particle, particle_idx = work_item
+    x0, y0, x1, y1 = bbox
+    height, width = image_shape
     
-    try:
-        # Load image (with caching)
-        image = _load_image_cached(image_path)
-        
-        if image.ndim != 2:
-            return {
-                'filename': filename,
-                'particle_id': particle['particle_id'],
-                'image_index': image_index,
-                'bbox': tuple(particle['bbox']),
-                'success': False,
-                'error': 'Not grayscale'
-            }
-        
-        bbox = tuple(particle['bbox'])
-        particle_id = particle['particle_id']
-        
-        x0, y0, x1, y1 = bbox
-        
-        # Ensure coordinates are within bounds
-        x0 = max(0, int(x0))
-        y0 = max(0, int(y0))
-        x1 = min(image.shape[1], int(x1))
-        y1 = min(image.shape[0], int(y1))
-        
-        if x1 <= x0 or y1 <= y0:
-            return {
+    # Ensure box stays within bounds
+    x0 = max(0, int(x0))
+    y0 = max(0, int(y0))
+    x1 = min(width, int(x1))
+    y1 = min(height, int(y1))
+    
+    # Ensure box is valid (has positive dimensions)
+    if x1 <= x0:
+        x1 = x0 + 1
+    if y1 <= y0:
+        y1 = y0 + 1
+    
+    return (x0, y0, x1, y1)
+
+
+def process_single_particle_with_tracking(work_item: Tuple[Dict, List[str], List[str]]) -> List[Dict[str, Any]]:
+    """
+    Worker function: process a single particle through all frames sequentially with adaptive bbox tracking.
+    
+    This function tracks the particle position across frames by adjusting the bounding box
+    based on the fitted center from the previous frame. This ensures the particle stays
+    roughly centered in the fitting region even when significant drift occurs.
+    
+    Args:
+        work_item: (particle_dict, list_of_image_paths, list_of_filenames)
+    
+    Returns:
+        List of dictionaries with fit results for all frames of this particle
+    """
+    particle, image_paths, filenames = work_item
+    particle_id = particle['particle_id']
+    
+    results = []
+    
+    # Start with the manually selected bbox from step 1
+    current_bbox = list(particle['bbox'])  # [x0, y0, x1, y1]
+    bbox_width = current_bbox[2] - current_bbox[0]
+    bbox_height = current_bbox[3] - current_bbox[1]
+    
+    # Track previous fitted center for shift calculation
+    prev_fitted_center = None
+    
+    for img_idx, (image_path, filename) in enumerate(zip(image_paths, filenames)):
+        try:
+            # Load image (with caching)
+            image = _load_image_cached(image_path)
+            
+            if image.ndim != 2:
+                results.append({
+                    'filename': filename,
+                    'particle_id': particle_id,
+                    'image_index': img_idx,
+                    'bbox': tuple(current_bbox),
+                    'success': False,
+                    'error': 'Not grayscale'
+                })
+                continue
+            
+            # Clip bbox to image bounds
+            x0, y0, x1, y1 = clip_bbox_to_bounds(current_bbox, image.shape)
+            
+            if x1 <= x0 or y1 <= y0:
+                results.append({
+                    'filename': filename,
+                    'particle_id': particle_id,
+                    'image_index': img_idx,
+                    'bbox': (x0, y0, x1, y1),
+                    'success': False,
+                    'error': 'Invalid bbox'
+                })
+                continue
+            
+            # Extract region
+            region = image[y0:y1, x0:x1].copy()
+            
+            # Fit Gaussian
+            fit_result = fit_gaussian_to_region(region, (x0, y0, x1, y1))
+            
+            # Build result record
+            result = {
                 'filename': filename,
                 'particle_id': particle_id,
-                'image_index': image_index,
-                'bbox': bbox,
-                'success': False,
-                'error': 'Invalid bbox'
+                'image_index': img_idx,
+                'bbox': (x0, y0, x1, y1),
+                'success': fit_result is not None and fit_result.get('success', False)
             }
-        
-        # Extract region
-        region = image[y0:y1, x0:x1].copy()
-        
-        # Fit Gaussian
-        fit_result = fit_gaussian_to_region(region, (x0, y0, x1, y1))
-        
-        # Build result record
-        result = {
-            'filename': filename,
-            'particle_id': particle_id,
-            'image_index': image_index,
-            'bbox': bbox,
-            'success': fit_result is not None and fit_result.get('success', False)
-        }
-        
-        if result['success']:
-            result.update(fit_result)
-        
-        return result
-        
-    except Exception as e:
-        return {
-            'filename': filename,
-            'particle_id': particle['particle_id'],
-            'image_index': image_index,
-            'bbox': tuple(particle['bbox']),
-            'success': False,
-            'error': str(e)
-        }
+            
+            if result['success']:
+                result.update(fit_result)
+                
+                # Adaptive bbox tracking: adjust bbox for next frame based on fitted center
+                if img_idx < len(image_paths) - 1:  # Don't adjust after last frame
+                    fitted_center_x = fit_result['center_x']
+                    fitted_center_y = fit_result['center_y']
+                    
+                    # Calculate current bbox center
+                    bbox_center_x = (x0 + x1) / 2.0
+                    bbox_center_y = (y0 + y1) / 2.0
+                    
+                    # Calculate shift
+                    shift_x = fitted_center_x - bbox_center_x
+                    shift_y = fitted_center_y - bbox_center_y
+                    
+                    # Adjust bbox for next frame, keeping size constant
+                    current_bbox = [
+                        x0 + shift_x,
+                        y0 + shift_y,
+                        x0 + shift_x + bbox_width,
+                        y0 + shift_y + bbox_height
+                    ]
+                    
+                    # Log significant shifts (for debugging)
+                    shift_magnitude = np.sqrt(shift_x**2 + shift_y**2)
+                    if shift_magnitude > 5.0:  # More than 5 pixels
+                        result['bbox_shift_magnitude'] = shift_magnitude
+            else:
+                # If fit failed, keep the same bbox for next frame
+                # (don't propagate failure by shifting to a bad position)
+                pass
+            
+            results.append(result)
+            
+        except Exception as e:
+            results.append({
+                'filename': filename,
+                'particle_id': particle_id,
+                'image_index': img_idx,
+                'bbox': tuple(current_bbox),
+                'success': False,
+                'error': str(e)
+            })
+    
+    return results
 
 
 def export_results_to_csv(set_result: Dict[str, Any], output_dir: Path) -> Dict[str, str]:
@@ -434,38 +506,47 @@ def main():
     logger.info(f"\nUsing {num_workers} workers (1/4 of {total_cores} CPU cores) - optimized for HDD")
 
     logger.info("\n" + "="*60)
-    logger.info("Starting parallel drift analysis...")
+    logger.info("Starting parallel drift analysis with adaptive bbox tracking...")
     logger.info("="*60 + "\n")
 
-    # Create all work items (image, particle combinations)
-    work_items = []
-    for img_idx, tif_file in enumerate(tif_files):
-        for particle_idx, particle in enumerate(selected_particles):
-            work_items.append((
-                str(tif_file),           # image_path
-                img_idx,                  # image_index
-                tif_file.name,           # filename
-                particle,                 # particle dict
-                particle_idx              # particle_index
-            ))
+    # Create work items: one per particle (each contains all image paths)
+    # This allows sequential processing within each particle for bbox tracking
+    image_paths = [str(f) for f in tif_files]
+    filenames = [f.name for f in tif_files]
     
-    total_work_items = len(work_items)
-    logger.info(f"Total Gaussian fits to perform: {total_work_items}")
-    logger.info(f"  ({len(tif_files)} images × {len(selected_particles)} particles)\n")
+    work_items = []
+    for particle in selected_particles:
+        work_items.append((
+            particle,      # particle dict
+            image_paths,   # all image paths (processed sequentially per particle)
+            filenames      # all filenames
+        ))
+    
+    total_particles = len(selected_particles)
+    total_fits = len(tif_files) * len(selected_particles)
+    logger.info(f"Total particles to track: {total_particles}")
+    logger.info(f"Total Gaussian fits to perform: {total_fits}")
+    logger.info(f"  ({len(tif_files)} images × {len(selected_particles)} particles)")
+    logger.info(f"\nAdaptive bbox tracking: Each particle tracked sequentially through all frames")
+    logger.info(f"  Bbox adjusts after each fit to keep particle centered\n")
 
-    # Process in parallel with progress bar
+    # Process in parallel (one worker per particle)
     start_time = time.time()
     
     all_results = []
     
-    with Pool(processes=num_workers) as pool:
-        # Use imap_unordered for streaming results with progress tracking
-        with tqdm(total=total_work_items, desc="Fitting Gaussians", unit="fit", ncols=100) as pbar:
-            for result in pool.imap_unordered(process_single_fit, work_items, chunksize=10):
-                all_results.append(result)
+    # Adjust worker count if we have fewer particles than workers
+    actual_workers = min(num_workers, total_particles)
+    
+    with Pool(processes=actual_workers) as pool:
+        # Use imap for ordered results with progress tracking by particle
+        with tqdm(total=total_particles, desc="Processing particles", unit="particle", ncols=100) as pbar:
+            for particle_results in pool.imap(process_single_particle_with_tracking, work_items):
+                all_results.extend(particle_results)  # Each result is a list of fits for one particle
                 pbar.update(1)
     
     end_time = time.time()
+
 
     logger.info("\n" + "="*60)
     logger.info("Parallel processing complete!")
@@ -537,7 +618,7 @@ def main():
     logger.info(f"Total fits attempted: {set_result['total_fits_attempted']}")
     logger.info(f"Successful fits: {set_result['successful_fits']}")
     logger.info(f"Success rate: {set_result['success_rate']:.1f}%")
-    logger.info(f"Average time per fit: {(end_time - start_time) / total_work_items * 1000:.2f} ms\n")
+    logger.info(f"Average time per fit: {(end_time - start_time) / total_fits * 1000:.2f} ms\n")
 
     if csv_info:
         logger.info(f"CSV file saved: {csv_info['csv_file_name']}")
